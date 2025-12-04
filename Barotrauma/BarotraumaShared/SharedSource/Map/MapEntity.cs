@@ -47,9 +47,8 @@ namespace Barotrauma
 
         public readonly List<MapEntity> linkedTo = new List<MapEntity>();
 
-        protected bool flippedX, flippedY;
-        public bool FlippedX { get { return flippedX; } }
-        public bool FlippedY { get { return flippedY; } }
+        public bool FlippedX { get; protected set; }
+        public bool FlippedY { get; protected set; }
 
         public bool ShouldBeSaved = true;
 
@@ -90,6 +89,16 @@ namespace Barotrauma
                 }
             }
         }
+
+        public virtual float RotationRad { get; protected set; }
+
+        /// <summary>
+        /// Rotation taking into account flipping: if the entity is flipped on either axis, the rotation is negated 
+        /// (but not if it's flipped on both axes, two flips is essentially double negation).
+        /// </summary>
+        public float RotationRadWithFlipping => FlippedX ^ FlippedY ? -RotationRad : RotationRad;
+
+        public float RotationWithFlipping => MathHelper.ToDegrees(RotationRadWithFlipping);
 
         public virtual Rectangle Rect
         {
@@ -195,6 +204,16 @@ namespace Barotrauma
             get;
             set;
         }
+
+        /// <summary>
+        /// Is the layer this entity is in currently hidden? If it is, the entity is not updated and should do nothing.
+        /// </summary>
+        public bool IsLayerHidden { get; set; }
+
+        /// <summary>
+        /// Is the entity hidden due to <see cref="HiddenInGame"/> being enabled or the layer the entity is in being hidden?
+        /// </summary>
+        public bool IsHidden => HiddenInGame || IsLayerHidden;
 
         public override Vector2 Position
         {
@@ -535,7 +554,24 @@ namespace Barotrauma
                 return;
             }
 
+            //sort damageable walls by sprite depth:
+            //necessary because rendering the damage effect starts a new sprite batch and breaks the order otherwise
             int i = 0;
+            if (this is Structure { DrawDamageEffect: true } structure)
+            {
+                //insertion sort according to draw depth
+                float drawDepth = structure.SpriteDepth;
+                while (i < MapEntityList.Count)
+                {
+                    float otherDrawDepth = (MapEntityList[i] as Structure)?.SpriteDepth ?? 1.0f;
+                    if (otherDrawDepth < drawDepth) { break; }
+                    i++;
+                }
+                MapEntityList.Insert(i, this);
+                return;
+            }
+
+            i = 0;
             while (i < MapEntityList.Count)
             {
                 i++;
@@ -618,6 +654,10 @@ namespace Barotrauma
                 structure.Update(deltaTime, cam);
             }
 
+            foreach (Gap gap in Gap.GapList)
+            {
+                gap.ResetWaterFlowThisFrame();
+            }
             //update gaps in random order, because otherwise in rooms with multiple gaps
             //the water/air will always tend to flow through the first gap in the list,
             //which may lead to weird behavior like water draining down only through
@@ -670,9 +710,10 @@ namespace Barotrauma
         /// Flip the entity horizontally
         /// </summary>
         /// <param name="relativeToSub">Should the entity be flipped across the y-axis of the sub it's inside</param>
-        public virtual void FlipX(bool relativeToSub)
+        /// <param name="force">Forces the item to be flipped even if it's configured not to be flippable.</param>
+        public virtual void FlipX(bool relativeToSub, bool force = false)
         {
-            flippedX = !flippedX;
+            FlippedX = !FlippedX;
             if (!relativeToSub || Submarine == null) { return; }
 
             Vector2 relative = WorldPosition - Submarine.WorldPosition;
@@ -684,9 +725,10 @@ namespace Barotrauma
         /// Flip the entity vertically
         /// </summary>
         /// <param name="relativeToSub">Should the entity be flipped across the x-axis of the sub it's inside</param>
-        public virtual void FlipY(bool relativeToSub)
+        /// <param name="force">Forces the item to be flipped even if it's configured not to be flippable.</param>
+        public virtual void FlipY(bool relativeToSub, bool force = false)
         {
-            flippedY = !flippedY;
+            FlippedY = !FlippedY;
             if (!relativeToSub || Submarine == null) { return; }
 
             Vector2 relative = WorldPosition - Submarine.WorldPosition;

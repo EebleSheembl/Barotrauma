@@ -17,7 +17,8 @@ namespace Barotrauma
         private static Sprite infoAreaPortraitBG;
 
         public bool LastControlled;
-        public int CrewListIndex { get; set; } = -1;
+               
+        public int CrewListIndex { get; set; } = int.MaxValue; //default to the bottom of the list
 
         private Sprite disguisedPortrait;
         private List<WearableSprite> disguisedAttachmentSprites;
@@ -31,6 +32,8 @@ namespace Barotrauma
         private Sprite tintMask;
         private float tintHighlightThreshold;
         private float tintHighlightMultiplier;
+
+        public bool ShowTalentResetPopupOnOpen = true;
 
         public static void Init()
         {
@@ -141,7 +144,7 @@ namespace Barotrauma
                 {
                     Color textColor = Color.White * (0.5f + skill.Level / 200.0f);
 
-                    var skillName = new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.0f), skillsArea.RectTransform), TextManager.Get("SkillName." + skill.Identifier), textColor: textColor, font: font) { Padding = Vector4.Zero };
+                    var skillName = new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.0f), skillsArea.RectTransform), skill.DisplayName, textColor: textColor, font: font) { Padding = Vector4.Zero };
 
                     float modifiedSkillLevel = skill.Level;
                     if (Character != null)
@@ -208,7 +211,7 @@ namespace Barotrauma
             return frame;
         }
 
-        partial void OnSkillChanged(Identifier skillIdentifier, float prevLevel, float newLevel)
+        partial void OnSkillChanged(Identifier skillIdentifier, float prevLevel, float newLevel, bool forceNotification)
         {
             if (TeamID == CharacterTeamType.FriendlyNPC) { return; }
             if (Character.Controlled != null && Character.Controlled.TeamID != TeamID) { return; }
@@ -225,6 +228,18 @@ namespace Barotrauma
                     "+[value] "+ TextManager.Get("SkillName." + skillIdentifier).Value, 
                     specialIncrease ? GUIStyle.Orange : GUIStyle.Green, 
                     playSound: Character == Character.Controlled, skillIdentifier, increase);
+            }
+            else if (forceNotification)
+            {
+                float change = newLevel - prevLevel;
+                if (Math.Abs(change) > 0.01f)
+                {
+                    string sign = change > 0 ? "+" : "-";
+                    Character?.AddMessage(
+                        $"{sign}{Math.Round(change, 2)} {TextManager.Get("SkillName." + skillIdentifier).Value}",
+                        specialIncrease ? GUIStyle.Orange : GUIStyle.Green,
+                        playSound: Character == Character.Controlled);
+                }
             }
         }
 
@@ -345,64 +360,6 @@ namespace Barotrauma
             GUIStyle.Font.DrawString(spriteBatch, str, new Vector2(barRect.Right - iconXOffset - scaledTextSizeX - GUI.IntScale(4), barRect.Center.Y - scaledTextSizeY / 2), GUIStyle.TextColorNormal, 0f, Vector2.Zero, textScale, SpriteEffects.None, 0f);
         }
 
-        public void DrawPortrait(SpriteBatch spriteBatch, Vector2 screenPos, Vector2 offset, float targetWidth, bool flip = false, bool evaluateDisguise = false)
-        {
-            if (evaluateDisguise && IsDisguised) { return; }
-
-            Vector2? sheetIndex;
-            Sprite portraitToDraw;
-            List<WearableSprite> attachmentsToDraw;
-
-            Color hairColor;
-            Color facialHairColor;
-            Color skinColor;
-
-            if (!IsDisguisedAsAnother || !evaluateDisguise)
-            {
-                sheetIndex = Head.SheetIndex;
-                portraitToDraw = Portrait;
-                attachmentsToDraw = AttachmentSprites;
-
-                hairColor = Head.HairColor;
-                facialHairColor = Head.FacialHairColor;
-                skinColor = Head.SkinColor;
-            }
-            else
-            {
-                sheetIndex = disguisedSheetIndex;
-                portraitToDraw = disguisedPortrait;
-                attachmentsToDraw = disguisedAttachmentSprites;
-                
-                hairColor = disguisedHairColor;
-                facialHairColor = disguisedFacialHairColor;
-                skinColor = disguisedSkinColor;
-            }
-
-            if (portraitToDraw != null)
-            {
-                var currEffect = spriteBatch.GetCurrentEffect();
-                // Scale down the head sprite 10%
-                float scale = targetWidth * 0.9f / Portrait.size.X;
-                if (sheetIndex.HasValue)
-                {
-                    SetHeadEffect(spriteBatch);
-                    portraitToDraw.SourceRect = new Rectangle(CalculateOffset(portraitToDraw, sheetIndex.Value.ToPoint()), portraitToDraw.SourceRect.Size);
-                }
-                portraitToDraw.Draw(spriteBatch, screenPos + offset, skinColor, portraitToDraw.Origin, scale: scale, spriteEffect: flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
-                if (attachmentsToDraw != null)
-                {
-                    float depthStep = 0.000001f;
-                    foreach (var attachment in attachmentsToDraw)
-                    {
-                        SetAttachmentEffect(spriteBatch, attachment);
-                        DrawAttachmentSprite(spriteBatch, attachment, portraitToDraw, sheetIndex, screenPos + offset, scale, depthStep, GetAttachmentColor(attachment, hairColor, facialHairColor), flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
-                        depthStep += depthStep;
-                    }
-                }
-                spriteBatch.SwapEffect(currEffect);
-            }
-        }
-
         //TODO: I hate this so much :(
         private SpriteBatch.EffectWithParams headEffectParameters;
         private Dictionary<WearableType, SpriteBatch.EffectWithParams> attachmentEffectParameters
@@ -451,23 +408,31 @@ namespace Barotrauma
             }
         }
         
-        public void DrawIcon(SpriteBatch spriteBatch, Vector2 screenPos, Vector2 targetAreaSize)
+        public void DrawIcon(SpriteBatch spriteBatch, Vector2 screenPos, Vector2 targetAreaSize, bool flip = false)
         {
             var headSprite = HeadSprite;
             if (headSprite != null)
             {
+                var spriteEffects = flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
+
                 var currEffect = spriteBatch.GetCurrentEffect();
                 float scale = Math.Min(targetAreaSize.X / headSprite.size.X, targetAreaSize.Y / headSprite.size.Y);
                 headSprite.SourceRect = new Rectangle(CalculateOffset(headSprite, Head.SheetIndex.ToPoint()), headSprite.SourceRect.Size);
                 SetHeadEffect(spriteBatch);
-                headSprite.Draw(spriteBatch, screenPos, scale: scale, color: Head.SkinColor);
+                Vector2 origin = headSprite.Origin;
+                if (flip)
+                {
+                    origin.X = headSprite.size.X - origin.X;
+                }
+                headSprite.Draw(spriteBatch, screenPos, origin: origin, scale: scale, color: Head.SkinColor, spriteEffect: spriteEffects);
                 if (AttachmentSprites != null)
                 {
                     float depthStep = 0.000001f;
                     foreach (var attachment in AttachmentSprites)
                     {
                         SetAttachmentEffect(spriteBatch, attachment);
-                        DrawAttachmentSprite(spriteBatch, attachment, headSprite, Head.SheetIndex, screenPos, scale, depthStep, GetAttachmentColor(attachment, Head.HairColor, Head.FacialHairColor));
+                        DrawAttachmentSprite(spriteBatch, attachment, headSprite, Head.SheetIndex, screenPos, scale, depthStep, GetAttachmentColor(attachment, Head.HairColor, Head.FacialHairColor), 
+                            spriteEffects: spriteEffects);
                         depthStep += depthStep;
                     }
                 }
@@ -507,10 +472,26 @@ namespace Barotrauma
             {
                 origin = head.Origin;
                 attachment.Sprite.Origin = origin;
+                if (spriteEffects.HasFlag(SpriteEffects.FlipHorizontally))
+                {
+                    origin.X = head.size.X - origin.X;
+                }
+                if (spriteEffects.HasFlag(SpriteEffects.FlipVertically))
+                {
+                    origin.Y = head.size.Y - origin.Y;
+                }
             }
             else
             {
                 origin = attachment.Sprite.Origin;
+                if (spriteEffects.HasFlag(SpriteEffects.FlipHorizontally))
+                {
+                    origin.X = attachment.Sprite.size.X - origin.X;
+                }
+                if (spriteEffects.HasFlag(SpriteEffects.FlipVertically))
+                {
+                    origin.Y = attachment.Sprite.size.Y - origin.Y;
+                }
             }
             float depth = attachment.Sprite.Depth;
             if (attachment.InheritLimbDepth)
@@ -519,12 +500,14 @@ namespace Barotrauma
             }
             attachment.Sprite.Draw(spriteBatch, drawPos, color ?? Color.White, origin, rotate: 0, scale: scale, depth: depth, spriteEffect: spriteEffects);
         }
-
         public static CharacterInfo ClientRead(Identifier speciesName, IReadMessage inc, bool requireJobPrefabFound = true)
         {
             ushort infoID = inc.ReadUInt16();
             string newName = inc.ReadString();
             string originalName = inc.ReadString();
+            bool renamingEnabled = inc.ReadBoolean();
+            BotStatus botStatus = (BotStatus)inc.ReadByte();
+            int salary = inc.ReadInt32();
             int tagCount = inc.ReadByte();
             HashSet<Identifier> tagSet = new HashSet<Identifier>();
             for (int i = 0; i < tagCount; i++)
@@ -538,7 +521,7 @@ namespace Barotrauma
             Color skinColor = inc.ReadColorR8G8B8();
             Color hairColor = inc.ReadColorR8G8B8();
             Color facialHairColor = inc.ReadColorR8G8B8();
-            
+
             Identifier npcId = inc.ReadIdentifier();
 
             Identifier factionId = inc.ReadIdentifier();
@@ -571,8 +554,11 @@ namespace Barotrauma
             CharacterInfo ch = new CharacterInfo(speciesName, newName, originalName, jobPrefab, variant, npcIdentifier: npcId)
             {
                 ID = infoID,
-                MinReputationToHire = (factionId, minReputationToHire)
+                MinReputationToHire = (factionId, minReputationToHire),
+                RenamingEnabled = renamingEnabled
             };
+            ch.BotStatus = botStatus;
+            ch.Salary = salary;
             ch.RecreateHead(tagSet.ToImmutableHashSet(), hairIndex, beardIndex, moustacheIndex, faceAttachmentIndex);
             ch.Head.SkinColor = skinColor;
             ch.Head.HairColor = hairColor;
@@ -582,6 +568,9 @@ namespace Barotrauma
 
             ch.ExperiencePoints = inc.ReadInt32();
             ch.AdditionalTalentPoints = inc.ReadRangedInteger(0, MaxAdditionalTalentPoints);
+            ch.PermanentlyDead = inc.ReadBoolean();
+            ch.TalentRefundPoints = inc.ReadInt32();
+            ch.TalentResetCount = inc.ReadInt32();
             return ch;
         }
 

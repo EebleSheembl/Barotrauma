@@ -1,8 +1,9 @@
-﻿using Barotrauma.Networking;
+﻿using Barotrauma.Extensions;
+using Barotrauma.Networking;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using System;
-using System.Diagnostics.Tracing;
+using System.Collections.Generic;
 
 namespace Barotrauma.Items.Components
 {
@@ -15,17 +16,32 @@ namespace Barotrauma.Items.Components
 
         public void Draw(SpriteBatch spriteBatch, bool editing, float itemDepth = -1, Color? overrideColor = null)
         {
-            if (!IsActive || picker == null || !CanBeAttached(picker) || !picker.IsKeyDown(InputType.Aim) || picker != Character.Controlled)
+            if (!IsActive || picker == null || !picker.IsKeyDown(InputType.Aim) || picker != Character.Controlled || !attachable)
             {
                 Drawable = false;
                 return;
             }
 
-            Vector2 gridPos = picker.Position;
-            Vector2 roundedGridPos = new Vector2(
-                MathUtils.RoundTowardsClosest(picker.Position.X, Submarine.GridSize.X),
-                MathUtils.RoundTowardsClosest(picker.Position.Y, Submarine.GridSize.Y));
+            Color indicatorColor = Color.White;
+            if (!CanBeAttached(picker, out IEnumerable<Item> overlappingItems))
+            {
+                foreach (var overlappingItem in overlappingItems)
+                {
+                    overlappingItem.Draw(spriteBatch, editing: false, overrideColor: Color.Red * 0.7f, overrideDepth: 0.0f);
+                }
+                indicatorColor = Color.Red;
+            }
+            
             Vector2 attachPos = GetAttachPosition(picker);
+
+            Vector2 gridPos = picker.Position;
+            if (AttachesToFloor)
+            {
+                gridPos.Y = attachPos.Y - item.Rect.Height / 2;
+            }
+            Vector2 roundedGridPos = new Vector2(
+                MathUtils.RoundTowardsClosest(gridPos.X, Submarine.GridSize.X),
+                MathUtils.RoundTowardsClosest(gridPos.Y, Submarine.GridSize.Y));
 
             if (item.Submarine == null)
             {
@@ -35,20 +51,20 @@ namespace Barotrauma.Items.Components
                     if (attachTarget.Submarine != null)
                     {
                         //set to submarine-relative position
-                        gridPos += attachTarget.Submarine.Position;
-                        roundedGridPos += attachTarget.Submarine.Position;
-                        attachPos += attachTarget.Submarine.Position;
+                        gridPos += attachTarget.Submarine.DrawPosition;
+                        roundedGridPos += attachTarget.Submarine.DrawPosition;
+                        attachPos += attachTarget.Submarine.DrawPosition;
                     }
                 }
             }
             else
             {
-                gridPos += item.Submarine.Position;
-                roundedGridPos += item.Submarine.Position;
-                attachPos += item.Submarine.Position;
+                gridPos += item.Submarine.DrawPosition;
+                roundedGridPos += item.Submarine.DrawPosition;
+                attachPos += item.Submarine.DrawPosition;
             }
 
-            Submarine.DrawGrid(spriteBatch, 14, gridPos, roundedGridPos, alpha: 0.4f);
+            Submarine.DrawGrid(spriteBatch, 14, gridPos, roundedGridPos, alpha: 0.4f, color: indicatorColor);
 
             Sprite sprite = item.Sprite;
             foreach (ContainedItemSprite containedSprite in item.Prefab.ContainedSprites)
@@ -63,7 +79,7 @@ namespace Barotrauma.Items.Components
             sprite.Draw(
                 spriteBatch,
                 new Vector2(attachPos.X, -attachPos.Y),
-                item.SpriteColor * 0.5f,
+                item.SpriteColor.Multiply(indicatorColor) * 0.5f,
                 item.RotationRad, 
                 item.Scale, SpriteEffects.None, 0.0f);
 
@@ -71,13 +87,13 @@ namespace Barotrauma.Items.Components
         }
 
         public override bool ValidateEventData(NetEntityEvent.IData data)
-            => TryExtractEventData<EventData>(data, out _);
+            => TryExtractEventData<AttachEventData>(data, out _);
 
         public void ClientEventWrite(IWriteMessage msg, NetEntityEvent.IData extraData = null)
         {
-            if (!attachable || body == null) { return; }
+            if (!attachable || originalBody == null) { return; }
             
-            var eventData = ExtractEventData<EventData>(extraData);
+            var eventData = ExtractEventData<AttachEventData>(extraData);
 
             Vector2 attachPos = eventData.AttachPos;
             msg.WriteSingle(attachPos.X);
@@ -94,7 +110,9 @@ namespace Barotrauma.Items.Components
             bool shouldBeAttached = msg.ReadBoolean();
             Vector2 simPosition = new Vector2(msg.ReadSingle(), msg.ReadSingle());
             UInt16 submarineID = msg.ReadUInt16();
+            UInt16 attacherID = msg.ReadUInt16();
             Submarine sub = Entity.FindEntityByID(submarineID) as Submarine;
+            Character attacher = Entity.FindEntityByID(attacherID) as Character;
 
             if (shouldBeAttached)
             {
@@ -104,6 +122,8 @@ namespace Barotrauma.Items.Components
                     item.SetTransform(simPosition, 0.0f);
                     item.Submarine = sub;
                     AttachToWall();
+                    PlaySound(ActionType.OnUse, attacher);
+                    ApplyStatusEffects(ActionType.OnUse, (float)Timing.Step, character: attacher, user: attacher);
                 }
             }
             else
@@ -111,9 +131,9 @@ namespace Barotrauma.Items.Components
                 if (attached)
                 {
                     DropConnectedWires(null);
-                    if (body != null)
+                    if (originalBody != null)
                     {
-                        item.body = body;
+                        item.body = originalBody;
                         item.body.Enabled = true;
                     }
                     IsActive = false;

@@ -83,6 +83,8 @@ namespace Barotrauma
 #if DEBUG
         private GUIComponent editor;
 
+        private bool editorEnabled;
+
         private void CreateEditor()
         {
             editor = new GUIFrame(new RectTransform(new Vector2(0.25f, 1.0f), GUI.Canvas, Anchor.TopRight, minSize: new Point(400, 0)));
@@ -378,17 +380,24 @@ namespace Barotrauma
 
             bool showReputation = hudVisibility > 0.0f && location.Type.HasOutpost && location.Reputation != null;
 
+            LocationType locationTypeToDisplay = location.GetLocationTypeToDisplay(out Identifier overrideDescriptionIdentifier);
+
             new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.0f), content.RectTransform), location.DisplayName, font: GUIStyle.LargeFont) { Padding = Vector4.Zero };
             if (!location.Type.Name.IsNullOrEmpty())
             {
-                new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.0f), content.RectTransform), location.Type.Name, font: GUIStyle.SubHeadingFont) { Padding = Vector4.Zero };
+                new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.0f), content.RectTransform), locationTypeToDisplay.Name, font: GUIStyle.SubHeadingFont) { Padding = Vector4.Zero };
             }
 
             CreateSpacing(10);
 
-            if (!location.Type.Description.IsNullOrEmpty())
+            var description = locationTypeToDisplay.Description;
+            if (!overrideDescriptionIdentifier.IsEmpty)
             {
-                CreateTextWithIcon(location.Type.Description, location.Type.Sprite);
+                description = TextManager.Get(overrideDescriptionIdentifier);
+            }
+            if (!description.IsNullOrEmpty())
+            {
+                CreateTextWithIcon(description, locationTypeToDisplay.Sprite);
             }
 
             int highestSubTier = location.HighestSubmarineTierAvailable();
@@ -527,8 +536,15 @@ namespace Barotrauma
 #if DEBUG
             if (GameMain.DebugDraw)
             {
-                if (editor == null) CreateEditor();
-                editor.AddToGUIUpdateList(order: 1);
+                if (editor == null) { CreateEditor(); }
+                if (editorEnabled)
+                {
+                    editor.AddToGUIUpdateList(order: 1);
+                }
+                if (PlayerInput.KeyHit(Keys.T))
+                {
+                    editorEnabled = !editorEnabled;
+                }
             }
 
             if (PlayerInput.KeyHit(Keys.Space))
@@ -699,6 +715,7 @@ namespace Barotrauma
                             CurrentLocation.CreateStores();
                             ProgressWorld(campaign);
                             Radiation?.OnStep(1);
+                            mapAnimQueue.Clear();
                         }
                         else
                         {
@@ -814,7 +831,7 @@ namespace Barotrauma
                     drawRect.X = (int)pos.X - drawRect.Width / 2;
                     drawRect.Y = (int)pos.Y - drawRect.Width / 2;
 
-                    if (drawRect.X > rect.Right - GUI.IntScale(100) && generationParams.MissionIcon != null && location.AvailableMissions.Any())
+                    if (drawRect.X > rect.Right - GUI.IntScale(100) && generationParams.MissionIcon != null && location.AvailableAndVisibleMissions.Any(m => m.Prefab.ShowInMenus))
                     {
                         Vector2 offScreenMissionIconPos = new Vector2(rect.Right - GUI.IntScale(50), drawRect.Center.Y);
                         generationParams.MissionIcon.Draw(spriteBatch,
@@ -828,7 +845,7 @@ namespace Barotrauma
 
                     if (!rect.Intersects(drawRect)) { continue; }
 
-                    Color color = location.Type.SpriteColor;
+                    Color color = location.OverrideIconColor ?? location.Type.SpriteColor;
                     if (!location.Visited) { color = Color.White; }
                     if (location.Connections.Find(c => c.Locations.Contains(currentDisplayLocation)) == null)
                     {
@@ -849,6 +866,27 @@ namespace Barotrauma
                         color = Color.Lerp(color, GUIStyle.Yellow, notificationColorLerp);
                         iconScale *= notificationPulseAmount;
                     }
+
+#if DEBUG
+                    if (generationParams.ShowStoreInfo)
+                    {
+                        if (location.Stores == null || location.Stores.None())
+                        {
+                            color = Color.DarkBlue;
+                        }
+                        //stores created, but nothing in stock
+                        else if (location.Stores.Values.None(s => s.Stock.Any()))
+                        {
+                            color = Color.Yellow;
+                        }
+                        else
+                        {
+                            color = Color.Green;
+                        }
+
+                        GUI.DrawString(spriteBatch, pos + Vector2.One * 20, "Time since visited: " +location.WorldStepsSinceVisited, Color.Yellow);
+                    }
+#endif
 
                     locationSprite.Draw(spriteBatch, pos, color,
                         scale: generationParams.LocationIconSize / locationSprite.size.X * iconScale * zoom);
@@ -905,49 +943,51 @@ namespace Barotrauma
                     }
                     if (location != CurrentLocation && generationParams.MissionIcon != null)
                     {
-                        if ((CurrentLocation == currentDisplayLocation && CurrentLocation.AvailableMissions.Any(m => m.Locations.Contains(location))) || 
-                            location.AvailableMissions.Any(m => m.Locations[0] == m.Locations[1]))
+                        var currentLocationVisibleMissions = CurrentLocation.AvailableAndVisibleMissions;
+                        if ((CurrentLocation == currentDisplayLocation && currentLocationVisibleMissions.Any(m => m.Locations.Contains(location))) || 
+                            location.AvailableAndVisibleMissions.Any(m => m.Locations[0] == m.Locations[1]))
                         {
                             Vector2 missionIconPos = pos + new Vector2(1.35f, 0.35f) * generationParams.LocationIconSize * 0.5f * zoom;
                             generationParams.MissionIcon.Draw(spriteBatch, missionIconPos, generationParams.IndicatorColor, scale: missionIconScale * zoom);
                             if (Vector2.Distance(PlayerInput.MousePosition, missionIconPos) < generationParams.MissionIcon.SourceRect.Width * zoom && IsPreferredTooltip(missionIconPos))
                             {
-                                var availableMissions = CurrentLocation.AvailableMissions
+                                var allVisibleMissions = currentLocationVisibleMissions
                                     .Where(m => m.Locations.Contains(location))
-                                    .Concat(location.AvailableMissions.Where(m => m.Locations[0] == m.Locations[1]))
+                                    .Concat(location.AvailableAndVisibleMissions.Where(m => m.Locations[0] == m.Locations[1]))
                                     .Distinct();
-                                tooltip = (new Rectangle(missionIconPos.ToPoint(), new Point(30)), TextManager.Get("mission") + '\n'+ string.Join('\n', availableMissions.Select(m => "- " + m.Name)));
+                                tooltip = (new Rectangle(missionIconPos.ToPoint(), new Point(30)), TextManager.Get("mission") + '\n'+ string.Join('\n', allVisibleMissions.Select(m => "- " + m.Name)));
                             }
                         }
                     }
 
                     if (GameMain.DebugDraw)
                     {
-                        Vector2 dPos = pos;
+                        //move the debug texts upwards so they don't go under the info panel that appears when highlighted
+                        Vector2 dPos = pos + new Vector2(15, -100);
                         if (location == HighlightedLocation)
                         {
-                            dPos.Y -= 80;
-                            GUI.DrawString(spriteBatch, dPos + new Vector2(15, 32), "Faction: " + (location.Faction?.Prefab.Name ?? "none"), Color.White, Color.Black, font: GUIStyle.SubHeadingFont);
-                            GUI.DrawString(spriteBatch, dPos + new Vector2(15, 50), "Secondary Faction: " + (location.SecondaryFaction?.Prefab.Name ?? "none"), Color.White, Color.Black, font: GUIStyle.SubHeadingFont);
-                            dPos.Y += 48;
+                            GUI.DrawString(spriteBatch, dPos, "Faction: " + (location.Faction?.Prefab.Name ?? "none"), Color.White, Color.Black, font: GUIStyle.SubHeadingFont);
+                            GUI.DrawString(spriteBatch, dPos + new Vector2(0, 18), "Secondary Faction: " + (location.SecondaryFaction?.Prefab.Name ?? "none"), Color.White, Color.Black, font: GUIStyle.SubHeadingFont);
+                            dPos.Y += 50;
 
                             if (PlayerInput.KeyDown(Keys.LeftShift))
                             {
-                                GUI.DrawString(spriteBatch, new Vector2(150,150), "Dist: " +
+                                GUI.DrawString(spriteBatch, new Vector2(150, 150), "Dist: " +
                                     GetDistanceToClosestLocationOrConnection(CurrentLocation, int.MaxValue, loc => loc == location), Color.White, Color.Black, font: GUIStyle.SubHeadingFont);
-
                             }
+                            GUI.DrawString(spriteBatch, dPos, $"Difficulty: {location.LevelData.Difficulty.FormatSingleDecimal()}",
+                                ToolBox.GradientLerp(location.LevelData.Difficulty / 100.0f, GUIStyle.Blue, GUIStyle.Yellow, GUIStyle.Red), Color.Black * 0.8f, 4, font: GUIStyle.SmallFont);
+                            
+                            dPos.Y += 25;
+                            GUI.DrawString(spriteBatch, dPos, $"Biome: {location.LevelData.Biome.DisplayName} ({location.LevelData.GenerationParams.Identifier})", Color.White, Color.Black, font: GUIStyle.SmallFont);
                         }
-                        dPos.Y += 48;
-                        GUI.DrawString(spriteBatch, dPos, $"Difficulty: {location.LevelData.Difficulty.FormatSingleDecimal()}", Color.White, Color.Black * 0.8f, 4, font: GUIStyle.SmallFont);
                     }
                 }
             }
 
             DrawDecorativeHUD(spriteBatch, rect);
 
-            bool drawRadiationTooltip = true;
-            
+            bool drawRadiationTooltip = HighlightedLocation == null;            
             if (tooltip != null)
             {
                 GUIComponent.DrawToolTip(spriteBatch, tooltip.Value.tip, tooltip.Value.targetArea);
@@ -962,6 +1002,12 @@ namespace Barotrauma
             spriteBatch.End();
             GameMain.Instance.GraphicsDevice.ScissorRectangle = prevScissorRect;
             spriteBatch.Begin(SpriteSortMode.Deferred, samplerState: GUI.SamplerState, rasterizerState: GameMain.ScissorTestEnable);
+#if DEBUG
+            if (GameMain.DebugDraw)
+            {
+                GUI.DrawString(spriteBatch, new Vector2(mapContainer.Center.X, mapContainer.Rect.Y), "Press T to toggle editing map generation parameters.", Color.Magenta, font: GUIStyle.SmallFont);
+            }
+#endif
         }
 
         public static void DrawNoise(SpriteBatch spriteBatch, Rectangle rect, float strength)
@@ -1056,7 +1102,7 @@ namespace Barotrauma
                 }
                 else
                 {
-                    if (MathUtils.GetLineRectangleIntersection(start, end, new Rectangle(viewArea.X, viewArea.Y + viewArea.Height, viewArea.Width, viewArea.Height), out Vector2 intersection))
+                    if (MathUtils.GetLineWorldRectangleIntersection(start, end, new Rectangle(viewArea.X, viewArea.Y + viewArea.Height, viewArea.Width, viewArea.Height), out Vector2 intersection))
                     {
                         if (!viewArea.Contains(start))
                         {
@@ -1115,13 +1161,23 @@ namespace Barotrauma
 
                 float subCrushDepth = SubmarineInfo.GetSubCrushDepth(SubmarineSelection.CurrentOrPendingSubmarine(), ref pendingSubInfo);
                 string crushDepthWarningIconStyle = null;
-                if (connection.LevelData.InitialDepth * Physics.DisplayToRealWorldRatio > subCrushDepth)
+
+                var levelData = connection.LevelData;
+                float spawnDepth =
+                    levelData.InitialDepth +
+                    //base the warning on the start or end position of the level, whichever is deeper
+                    levelData.Size.Y * Math.Max(levelData.GenerationParams.StartPosition.Y, levelData.GenerationParams.EndPosition.Y);
+
+                //"high warning" if the sub spawns at/below crush depth
+                if (spawnDepth * Physics.DisplayToRealWorldRatio > subCrushDepth)
                 {
                     iconCount++;
                     crushDepthWarningIconStyle = "CrushDepthWarningHighIcon";
                     tooltip = "crushdepthwarninghigh";
                 }
-                else if ((connection.LevelData.InitialDepth + connection.LevelData.Size.Y) * Physics.DisplayToRealWorldRatio > subCrushDepth)
+                //"low warning" if the spawn position is less than the level's height away from crush depth
+                //(i.e. the crush depth is pretty close to the spawn pos, possibly inside the level or at least close enough that many parts of the abyss are unreachable)
+                else if ((spawnDepth + connection.LevelData.Size.Y) * Physics.DisplayToRealWorldRatio > subCrushDepth)
                 {
                     iconCount++;
                     crushDepthWarningIconStyle = "CrushDepthWarningLowIcon";
@@ -1186,7 +1242,9 @@ namespace Barotrauma
                 Vector2 center = rectCenter + (connection.CenterPos + viewOffset) * zoom;
                 if (viewArea.Contains(center) && connection.Biome != null)
                 {
-                    GUI.DrawString(spriteBatch, center, (connection.LevelData?.GenerationParams?.Identifier ?? connection.Biome.Identifier) + " (" + connection.Difficulty.FormatSingleDecimal() + ")", Color.White);
+                    GUI.DrawString(spriteBatch, center - Vector2.UnitX * 50,
+                        $"{(connection.LevelData?.GenerationParams?.Identifier ?? connection.Biome.Identifier)} ({connection.Difficulty.FormatSingleDecimal()})",
+                        ToolBox.GradientLerp(connection.Difficulty / 100.0f, GUIStyle.Blue, GUIStyle.Yellow, GUIStyle.Red), backgroundColor: Color.Black * 0.7f, font: GUIStyle.SmallFont);
                 }
             }
 

@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using Barotrauma.IO;
 using Barotrauma.Extensions;
@@ -33,6 +33,8 @@ namespace Barotrauma
 
         public static int LanguageVersion { get; private set; } = 0;
 
+        private readonly static object mutex = new object();
+
         private static ImmutableArray<Range<int>> UnicodeToIntRanges(params UnicodeRange[] ranges)
             => ranges
                 .Select(r => new Range<int>(r.FirstCodePoint, r.FirstCodePoint + r.Length - 1))
@@ -60,7 +62,9 @@ namespace Barotrauma
             = new[]
             {
                 (SpeciallyHandledCharCategory.CJK, UnicodeToIntRanges(
+                    UnicodeRanges.HalfwidthandFullwidthForms,
                     UnicodeRanges.HangulJamo,
+                    UnicodeRanges.HangulCompatibilityJamo,
                     UnicodeRanges.CjkRadicalsSupplement,
                     UnicodeRanges.CjkSymbolsandPunctuation,
                     UnicodeRanges.EnclosedCjkLettersandMonths,
@@ -85,12 +89,36 @@ namespace Barotrauma
                 ))
             }.ToImmutableDictionary();
 
+        private readonly struct CachedCategory
+        {
+            public readonly SpeciallyHandledCharCategory Category;
+            public readonly double LastAccessed;
+
+            public CachedCategory(SpeciallyHandledCharCategory category)
+            {
+                Category = category;
+                LastAccessed = Timing.TotalTime;
+            }
+        }
+
+        const int SpeciallyHandledCategoriesCacheSize = 5000;
+        private static readonly Dictionary<string, CachedCategory> SpeciallyHandledCategoriesCache = new Dictionary<string, CachedCategory>();
+
         public static SpeciallyHandledCharCategory GetSpeciallyHandledCategories(LocalizedString text)
             => GetSpeciallyHandledCategories(text.Value);
-
+                
         public static SpeciallyHandledCharCategory GetSpeciallyHandledCategories(string text)
         {
             if (string.IsNullOrEmpty(text)) { return SpeciallyHandledCharCategory.None; }
+
+            lock (mutex)
+            {
+                if (SpeciallyHandledCategoriesCache.TryGetValue(text, out var cachedCategory))
+                {
+                    SpeciallyHandledCategoriesCache[text] = new CachedCategory(cachedCategory.Category);
+                    return cachedCategory.Category;
+                }
+            }
 
             var retVal = SpeciallyHandledCharCategory.None;
             for (int i = 0; i < text.Length; i++)
@@ -99,7 +127,7 @@ namespace Barotrauma
 
                 foreach (var category in SpeciallyHandledCharCategories)
                 {
-                    if (retVal.HasFlag(category)) { continue; }
+                    if (retVal.AlreadyHasCategoryFlag(category)) { continue; }
                     
                     for (int j = 0; j < SpeciallyHandledCharacterRanges[category].Length; j++)
                     {
@@ -124,17 +152,47 @@ namespace Barotrauma
                     // Input contains characters from all
                     // specially handled categories, there's
                     // no need to inspect the string further
-                    return SpeciallyHandledCharCategory.All;
+                    break;
                 }
             }
+
+            lock (mutex)
+            {
+                SpeciallyHandledCategoriesCache[text] = new CachedCategory(retVal);
+                TrimSpeciallyHandledCategoriesCache();
+            }
+
             return retVal;
+        }
+
+        private static void TrimSpeciallyHandledCategoriesCache()
+        {
+            if (SpeciallyHandledCategoriesCache.Count > SpeciallyHandledCategoriesCacheSize)
+            {
+                //drop half of the cache, starting from the strings that haven't been used in the longest time
+
+                //this is relatively expensive (instantiates a big new list),
+                //but the cache should get cleared so infrequently (when 5000 unique texts have been visible, which may not even happen in normal gameplay)
+                //it should not have much effect in practice
+                foreach (var cachedVal in SpeciallyHandledCategoriesCache.OrderBy(static c => c.Value.LastAccessed).Take(SpeciallyHandledCategoriesCacheSize / 2).ToList())
+                {
+                    SpeciallyHandledCategoriesCache.Remove(cachedVal.Key);
+                }
+            }
         }
 
         public static bool IsCJK(LocalizedString text)
             => IsCJK(text.Value);
 
         public static bool IsCJK(string text)
-            => GetSpeciallyHandledCategories(text).HasFlag(SpeciallyHandledCharCategory.CJK);
+            => GetSpeciallyHandledCategories(text).AlreadyHasCategoryFlag(SpeciallyHandledCharCategory.CJK);
+        
+        // This is a local optimized version of HasFlag/HasAnyFlag, which makes sense here because the loop using this is big enough
+        // to have made 8GB worth of memory allocations with HasFlag and still several dozen MB with the generic HasAnyFlag. 
+        private static bool AlreadyHasCategoryFlag(this SpeciallyHandledCharCategory existingFlags, SpeciallyHandledCharCategory categoryFlag)
+        {
+            return (existingFlags & categoryFlag) != 0;
+        }
         
         /// <summary>
         /// Check if the currently selected language is available, and switch to English if not
@@ -235,6 +293,25 @@ namespace Barotrauma
         public static string GetTranslatedLanguageName(LanguageIdentifier languageIdentifier)
         {
             return TextPacks[languageIdentifier].First().TranslatedName;
+        }
+
+        public static void LanguageChanged()
+        {
+            foreach ((LanguageIdentifier language, ImmutableList<TextPack> textPacks) in TextPacks)
+            {
+                foreach (TextPack textPack in textPacks)
+                {
+                    if (GameSettings.CurrentConfig.Language == language)
+                    {
+                        textPack.VerifyLoaded();
+                    }
+                    else
+                    {
+                        textPack.Unload();
+                    }
+                }
+            }
+            ClearCache();
         }
 
         public static void ClearCache()

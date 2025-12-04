@@ -16,6 +16,12 @@ namespace Barotrauma
         private readonly HashSet<NetWalletTransaction> transactions = new HashSet<NetWalletTransaction>();
         private const float clientCheckInterval = 10;
         private float clientCheckTimer = clientCheckInterval;
+        
+        /// <summary>
+        /// Temporary backup storage for characters that have been overwritten by SaveSingleCharacter, this will be gone
+        /// once the round ends or the server closes. Currently needed to enable the console command "revive" in ironman mode.
+        /// </summary>
+        public List<CharacterCampaignData> replacedCharacterDataBackup = new List<CharacterCampaignData>();
 
         public override Wallet GetWallet(Client client = null)
         {
@@ -86,6 +92,7 @@ namespace Barotrauma
                 purchasedHullRepairs = value;
                 PurchasedHullRepairsInLatestSave |= value;
                 IncrementLastUpdateIdForFlag(NetFlags.Misc);
+                DebugConsole.NewMessage("Set PurchasedHullRepairs to " + PurchasedHullRepairs, Color.Cyan);
             }
         }
         public override bool PurchasedLostShuttles
@@ -115,21 +122,21 @@ namespace Barotrauma
         {
             if (string.IsNullOrWhiteSpace(savePath)) { return; }
 
-            GameMain.GameSession = new GameSession(new SubmarineInfo(subPath), savePath, GameModePreset.MultiPlayerCampaign, startingSettings, seed);
+            GameMain.GameSession = new GameSession(new SubmarineInfo(subPath), Option.None, CampaignDataPath.CreateRegular(savePath), GameModePreset.MultiPlayerCampaign, startingSettings, seed);
             GameMain.NetLobbyScreen.ToggleCampaignMode(true);
-            SaveUtil.SaveGame(GameMain.GameSession.SavePath);
+            SaveUtil.SaveGame(GameMain.GameSession.DataPath);
 
             DebugConsole.NewMessage("Campaign started!", Color.Cyan);
             DebugConsole.NewMessage("Current location: " + GameMain.GameSession.Map.CurrentLocation.DisplayName, Color.Cyan);
             ((MultiPlayerCampaign)GameMain.GameSession.GameMode).LoadInitialLevel();
         }
 
-        public static void LoadCampaign(string selectedSave, Client client)
+        public static void LoadCampaign(CampaignDataPath path, Client client)
         {
             GameMain.NetLobbyScreen.ToggleCampaignMode(true);
             try
             {
-                SaveUtil.LoadGame(selectedSave);
+                SaveUtil.LoadGame(path);
                 if (GameMain.GameSession.GameMode is MultiPlayerCampaign mpCampaign)
                 {
                     mpCampaign.LastSaveID++;
@@ -142,7 +149,7 @@ namespace Barotrauma
             }
             catch (Exception e)
             {
-                string errorMsg = $"Error while loading the save {selectedSave}";
+                string errorMsg = $"Error while loading the save {path.LoadPath}";
                 if (client != null)
                 {
                     GameMain.Server?.SendDirectChatMessage($"{errorMsg}: {e.Message}\n{e.StackTrace}", client, ChatMessageType.Error);
@@ -203,7 +210,7 @@ namespace Barotrauma
                         {
                             try
                             {
-                                LoadCampaign(saveFiles[saveIndex].FilePath, client: null);
+                                LoadCampaign(CampaignDataPath.CreateRegular(saveFiles[saveIndex].FilePath), client: null);
                             }
                             catch (Exception ex)
                             {
@@ -235,6 +242,12 @@ namespace Barotrauma
         public void ClearSavedExperiencePoints(Client client)
         {
             savedExperiencePoints.RemoveAll(s => client.AccountId == s.AccountId || client.Connection.Endpoint.Address == s.Address);
+        }
+
+        public void RefreshCharacterCampaignData(Character character, bool refreshHealthData)
+        {
+            var matchingData = characterData.FirstOrDefault(c => c.CharacterInfo == character.Info);
+            matchingData?.Refresh(character, refreshHealthData: refreshHealthData);
         }
 
         public void SavePlayers()
@@ -283,7 +296,8 @@ namespace Barotrauma
                         data.Refresh(character, refreshHealthData: character.CauseOfDeath?.Type != CauseOfDeathType.Disconnected);
                         characterData.Add(data);
                     }
-                    else
+                    //check the cause of death in the CharacterInfo too (the character instance may have despawned, so we can't just rely on that)
+                    else if (data.CharacterInfo.CauseOfDeath is not { Type: CauseOfDeathType.Disconnected })
                     {
                         //character dead or removed -> reduce skills, remove items, health data, etc
                         data.CharacterInfo.ApplyDeathEffects();
@@ -295,6 +309,12 @@ namespace Barotrauma
             MoveDiscardedCharacterBalancesToBank();
 
             characterData.ForEach(cd => cd.HasSpawned = false);
+            foreach (var cd in characterData)
+            {
+                //remove from crewmanager - we don't need to save the data there if it's been saved as CharacterCampaignData
+                //(e.g. if a client has taken over a bot, we need to do this to prevent it being saved twice)
+                CrewManager.RemoveCharacterInfo(cd.CharacterInfo);
+            }
 
             SavePets();
 
@@ -377,8 +397,11 @@ namespace Barotrauma
                     }
                 }
                 // Event history must be registered before ending the round or it will be cleared
-                GameMain.GameSession.EventManager.RegisterEventHistory();
+                GameMain.GameSession.EventManager.StoreEventDataAtRoundEnd();
             }
+
+            //store the currently active missions at this point so we can communicate their states to clients, they're cleared in EndRound
+            List<Mission> missions = GameMain.GameSession.Missions.ToList();
 
             GameMain.GameSession.EndRound("", transitionType);
             
@@ -391,13 +414,13 @@ namespace Barotrauma
                 LeaveUnconnectedSubs(leavingSub);
                 NextLevel = newLevel;
                 GameMain.GameSession.SubmarineInfo = new SubmarineInfo(GameMain.GameSession.Submarine);
-                SaveUtil.SaveGame(GameMain.GameSession.SavePath);
+                SaveUtil.SaveGame(GameMain.GameSession.DataPath);
             }
             else
             {
                 PendingSubmarineSwitch = null;
                 GameMain.Server.EndGame(TransitionType.None, wasSaved: false);
-                LoadCampaign(GameMain.GameSession.SavePath, client: null);
+                LoadCampaign(GameMain.GameSession.DataPath, client: null);
                 LastSaveID++;
                 IncrementAllLastUpdateIds();
                 yield return CoroutineStatus.Success;
@@ -407,7 +430,7 @@ namespace Barotrauma
 
             //--------------------------------------
 
-            GameMain.Server.EndGame(transitionType, wasSaved: true);
+            GameMain.Server.EndGame(transitionType, wasSaved: true, missions);
 
             ForceMapUI = false;
 
@@ -513,6 +536,9 @@ namespace Barotrauma
             Map?.Radiation?.UpdateRadiation(deltaTime);
 
             base.Update(deltaTime);
+
+            MedicalClinic?.Update(deltaTime);
+
             if (Level.Loaded != null)
             {
                 if (Level.Loaded.Type == LevelData.LevelType.LocationConnection)
@@ -620,6 +646,7 @@ namespace Barotrauma
 
             msg.WriteBoolean(IsFirstRound);
             msg.WriteByte(CampaignID);
+            msg.WriteByte(RoundID);
             msg.WriteUInt16(lastSaveID);
             msg.WriteString(map.Seed);
 
@@ -835,6 +862,13 @@ namespace Barotrauma
                 purchasedItemSwaps.Add(new PurchasedItemSwap(itemToRemove, itemToInstall));
             }
 
+            if (purchasedUpgradeCount > 0 || purchasedItemSwapCount > 0)
+            {
+                //if the client attempted to purchase something, increment flag regardless of whether the upgrades were actually purchased or not
+                //so we can sync the correct state in case the client incorrectly assumed they can buy something (e.g. lost permissions just as they were purchasing)
+                IncrementLastUpdateIdForFlag(NetFlags.UpgradeManager);
+            }
+
             int hullRepairCost = GetHullRepairCost();
             int itemRepairCost = GetItemRepairCost();
             int shuttleRetrieveCost = CampaignMode.ShuttleReplaceCost;
@@ -899,207 +933,235 @@ namespace Barotrauma
                 CheckTooManyMissions(Map.CurrentLocation, sender);
             }
 
-            var prevBuyCrateItems = new Dictionary<Identifier, List<PurchasedItem>>();
-            foreach (var kvp in CargoManager.ItemsInBuyCrate)
+            if (HasCampaignInteractionAvailable(sender, InteractionType.Store))
             {
-                prevBuyCrateItems.Add(kvp.Key, new List<PurchasedItem>(kvp.Value));
-            }
-            foreach (var store in prevBuyCrateItems)
-            {
-                foreach (var item in store.Value.ToList())
+                var prevBuyCrateItems = new Dictionary<Identifier, List<PurchasedItem>>();
+                foreach (var kvp in CargoManager.ItemsInBuyCrate)
                 {
-                    CargoManager.ModifyItemQuantityInBuyCrate(store.Key, item.ItemPrefab, -item.Quantity, sender);
+                    prevBuyCrateItems.Add(kvp.Key, new List<PurchasedItem>(kvp.Value));
                 }
-            }
-            foreach (var store in buyCrateItems)
-            {
-                foreach (var item in store.Value.ToList())
+                foreach (var store in prevBuyCrateItems)
                 {
-                    if (map?.CurrentLocation?.Stores == null || !map.CurrentLocation.Stores.ContainsKey(store.Key)) { continue; }
-                    int availableQuantity = map.CurrentLocation.Stores[store.Key].Stock.Find(s => s.ItemPrefab == item.ItemPrefab)?.Quantity ?? 0;
-                    int alreadyPurchasedQuantity = 
-                        CargoManager.GetBuyCrateItem(store.Key, item.ItemPrefab)?.Quantity ?? 0 +
-                        CargoManager.GetPurchasedItemCount(store.Key, item.ItemPrefab);
-                    item.Quantity = MathHelper.Clamp(item.Quantity, 0, availableQuantity - alreadyPurchasedQuantity);
-                    CargoManager.ModifyItemQuantityInBuyCrate(store.Key, item.ItemPrefab, item.Quantity, sender);
-                }
-            }
-
-            var prevPurchasedItems = new Dictionary<Identifier, List<PurchasedItem>>();
-            foreach (var kvp in CargoManager.PurchasedItems)
-            {
-                prevPurchasedItems.Add(kvp.Key, new List<PurchasedItem>(kvp.Value));
-            }
-
-            foreach (var storeId in purchasedItems.Keys)
-            {
-                DebugConsole.Log($"Purchased items ({storeId}):\n");
-                if (prevPurchasedItems.TryGetValue(storeId, out var alreadyPurchased))
-                {
-                    var delivered = alreadyPurchased.Where(it => it.Delivered);
-                    var notDelivered = alreadyPurchased.Where(it => !it.Delivered);
-                    if (delivered.Any())
+                    foreach (var item in store.Value.ToList())
                     {
-                        DebugConsole.Log($"  Already delivered:\n" + string.Concat(delivered.Select(it => $"    - {it.ItemPrefab.Name} (x{it.Quantity})")));
-                    }
-                    if (notDelivered.Any())
-                    {
-                        DebugConsole.Log($"  Already purchased:\n" + string.Concat(notDelivered.Where(it => !it.Delivered).Select(it => $"    - {it.ItemPrefab.Name} (x{it.Quantity})")));
+                        CargoManager.ModifyItemQuantityInBuyCrate(store.Key, item.ItemPrefab, -item.Quantity, sender);
                     }
                 }
-                DebugConsole.Log($"  New purchases:");
-                foreach (var purchasedItem in purchasedItems[storeId])
+                foreach (var store in buyCrateItems)
                 {
-                    if (purchasedItem.Delivered) { continue; }
-                    int quantity = purchasedItem.Quantity;
-                    if (alreadyPurchased != null)
+                    foreach (var item in store.Value.ToList())
                     {
-                        quantity -= alreadyPurchased.Where(it => it.DeliverImmediately == purchasedItem.DeliverImmediately && it.ItemPrefab == purchasedItem.ItemPrefab).Sum(it => it.Quantity);
-                    }
-                    if (quantity > 0)
-                    {
-                        DebugConsole.Log($"    - {purchasedItem.ItemPrefab.Name} (x{quantity})");
+                        if (map?.CurrentLocation?.Stores == null || !map.CurrentLocation.Stores.ContainsKey(store.Key)) { continue; }
+                        int availableQuantity = map.CurrentLocation.Stores[store.Key].Stock.Find(s => s.ItemPrefab == item.ItemPrefab)?.Quantity ?? 0;
+                        int alreadyPurchasedQuantity = 
+                            CargoManager.GetBuyCrateItem(store.Key, item.ItemPrefab)?.Quantity ?? 0 +
+                            CargoManager.GetPurchasedItemCount(store.Key, item.ItemPrefab);
+                        item.Quantity = MathHelper.Clamp(item.Quantity, 0, availableQuantity - alreadyPurchasedQuantity);
+                        CargoManager.ModifyItemQuantityInBuyCrate(store.Key, item.ItemPrefab, item.Quantity, sender);
                     }
                 }
-            }
-            foreach (var storeId in soldItems.Keys)
-            {
-                DebugConsole.Log($"Sold items:\n" + string.Concat(soldItems[storeId].Select(it => $" - {it.ItemPrefab.Name}")));
-            }
 
-            foreach (var kvp in purchasedItems)
-            {
-                var storeId = kvp.Key;
-                var purchasedItemList = kvp.Value;
-                foreach (var purchasedItem in purchasedItemList)
+                var prevPurchasedItems = new Dictionary<Identifier, List<PurchasedItem>>();
+                foreach (var kvp in CargoManager.PurchasedItems)
                 {
-                    int desiredQuantity = purchasedItem.Quantity;
-                    if (prevPurchasedItems.TryGetValue(storeId, out var alreadyPurchasedList) &&
-                        alreadyPurchasedList.FirstOrDefault(p => p.ItemPrefab == purchasedItem.ItemPrefab && p.DeliverImmediately == purchasedItem.DeliverImmediately) is { } alreadyPurchased)
+                    prevPurchasedItems.Add(kvp.Key, new List<PurchasedItem>(kvp.Value));
+                }
+
+                foreach (var storeId in purchasedItems.Keys)
+                {
+                    DebugConsole.Log($"Purchased items ({storeId}):\n");
+                    if (prevPurchasedItems.TryGetValue(storeId, out var alreadyPurchased))
                     {
-                        desiredQuantity -= alreadyPurchased.Quantity;
+                        var delivered = alreadyPurchased.Where(it => it.Delivered);
+                        var notDelivered = alreadyPurchased.Where(it => !it.Delivered);
+                        if (delivered.Any())
+                        {
+                            DebugConsole.Log($"  Already delivered:\n" + string.Concat(delivered.Select(it => $"    - {it.ItemPrefab.Name} (x{it.Quantity})")));
+                        }
+                        if (notDelivered.Any())
+                        {
+                            DebugConsole.Log($"  Already purchased:\n" + string.Concat(notDelivered.Where(it => !it.Delivered).Select(it => $"    - {it.ItemPrefab.Name} (x{it.Quantity})")));
+                        }
                     }
-                    int availableQuantity = map.CurrentLocation.Stores[storeId].Stock.Find(s => s.ItemPrefab == purchasedItem.ItemPrefab)?.Quantity ?? 0;
-                    purchasedItem.Quantity = Math.Min(desiredQuantity, availableQuantity);
-                }
-                CargoManager.PurchaseItems(storeId, purchasedItemList, removeFromCrate: false, client: sender);
-            }
-
-            foreach (var (storeIdentifier, items) in CargoManager.PurchasedItems)
-            {
-                if (!prevPurchasedItems.ContainsKey(storeIdentifier))
-                {
-                    CargoManager.LogNewItemPurchases(storeIdentifier, items, sender);
-                    continue;
-                }
-
-                List<PurchasedItem> newItems = new List<PurchasedItem>();
-                List<PurchasedItem> prevItems = prevPurchasedItems[storeIdentifier];
-
-                foreach (PurchasedItem item in items)
-                {
-                    PurchasedItem matching = prevItems.FirstOrDefault(ppi => ppi.ItemPrefab == item.ItemPrefab);
-                    if (matching is null)
+                    DebugConsole.Log($"  New purchases:");
+                    foreach (var purchasedItem in purchasedItems[storeId])
                     {
-                        newItems.Add(item);
+                        if (purchasedItem.Delivered) { continue; }
+                        int quantity = purchasedItem.Quantity;
+                        if (alreadyPurchased != null)
+                        {
+                            quantity -= alreadyPurchased.Where(it => it.DeliverImmediately == purchasedItem.DeliverImmediately && it.ItemPrefab == purchasedItem.ItemPrefab).Sum(it => it.Quantity);
+                        }
+                        if (quantity > 0)
+                        {
+                            DebugConsole.Log($"    - {purchasedItem.ItemPrefab.Name} (x{quantity})");
+                        }
+                    }
+                }
+                foreach (var storeId in soldItems.Keys)
+                {
+                    DebugConsole.Log($"Sold items:\n" + string.Concat(soldItems[storeId].Select(it => $" - {it.ItemPrefab.Name}")));
+                }
+                foreach (var kvp in purchasedItems)
+                {
+                    var storeId = kvp.Key;
+                    var purchasedItemList = kvp.Value;
+                    foreach (var purchasedItem in purchasedItemList)
+                    {
+                        int desiredQuantity = purchasedItem.Quantity;
+                        if (prevPurchasedItems.TryGetValue(storeId, out var alreadyPurchasedList) &&
+                            alreadyPurchasedList.FirstOrDefault(p => p.ItemPrefab == purchasedItem.ItemPrefab && p.DeliverImmediately == purchasedItem.DeliverImmediately) is { } alreadyPurchased)
+                        {
+                            desiredQuantity -= alreadyPurchased.Quantity;
+                        }
+                        int availableQuantity = map.CurrentLocation.Stores[storeId].Stock.Find(s => s.ItemPrefab == purchasedItem.ItemPrefab)?.Quantity ?? 0;
+                        purchasedItem.Quantity = Math.Min(desiredQuantity, availableQuantity);
+                    }
+                    CargoManager.PurchaseItems(storeId, purchasedItemList, removeFromCrate: false, client: sender);
+                }
+
+                foreach (var (storeIdentifier, items) in CargoManager.PurchasedItems)
+                {
+                    if (!prevPurchasedItems.ContainsKey(storeIdentifier))
+                    {
+                        CargoManager.LogNewItemPurchases(storeIdentifier, items, sender);
                         continue;
                     }
-                    if (matching.Quantity < item.Quantity)
+
+                    List<PurchasedItem> newItems = new List<PurchasedItem>();
+                    List<PurchasedItem> prevItems = prevPurchasedItems[storeIdentifier];
+
+                    foreach (PurchasedItem item in items)
                     {
-                        newItems.Add(new PurchasedItem(item.ItemPrefab, item.Quantity - matching.Quantity, sender));
+                        PurchasedItem matching = prevItems.FirstOrDefault(ppi => ppi.ItemPrefab == item.ItemPrefab);
+                        if (matching is null)
+                        {
+                            newItems.Add(item);
+                            continue;
+                        }
+                        if (matching.Quantity < item.Quantity)
+                        {
+                            newItems.Add(new PurchasedItem(item.ItemPrefab, item.Quantity - matching.Quantity, sender));
+                        }
+                    }
+
+                    if (newItems.Any())
+                    {
+                        CargoManager.LogNewItemPurchases(storeIdentifier, newItems, sender);
                     }
                 }
 
-                if (newItems.Any())
+                bool allowedToSellSubItems = AllowedToManageCampaign(sender, ClientPermissions.SellSubItems);
+                if (allowedToSellSubItems)
                 {
-                    CargoManager.LogNewItemPurchases(storeIdentifier, newItems, sender);
-                }
-            }
-
-
-            bool allowedToSellSubItems = AllowedToManageCampaign(sender, ClientPermissions.SellSubItems);
-            if (allowedToSellSubItems)
-            {
-                var prevSubSellCrateItems = new Dictionary<Identifier, List<PurchasedItem>>(CargoManager.ItemsInSellFromSubCrate);
-                foreach (var store in prevSubSellCrateItems)
-                {
-                    foreach (var item in store.Value.ToList())
+                    var prevSubSellCrateItems = new Dictionary<Identifier, List<PurchasedItem>>(CargoManager.ItemsInSellFromSubCrate);
+                    foreach (var store in prevSubSellCrateItems)
                     {
-                        CargoManager.ModifyItemQuantityInSubSellCrate(store.Key, item.ItemPrefab, -item.Quantity, sender);
+                        foreach (var item in store.Value.ToList())
+                        {
+                            CargoManager.ModifyItemQuantityInSubSellCrate(store.Key, item.ItemPrefab, -item.Quantity, sender);
+                        }
+                    }
+                    foreach (var store in subSellCrateItems)
+                    {
+                        foreach (var item in store.Value.ToList())
+                        {
+                            CargoManager.ModifyItemQuantityInSubSellCrate(store.Key, item.ItemPrefab, item.Quantity, sender);
+                        }
                     }
                 }
-                foreach (var store in subSellCrateItems)
+
+                bool allowedToSellInventoryItems = AllowedToManageCampaign(sender, ClientPermissions.SellInventoryItems);
+                if (allowedToSellInventoryItems && allowedToSellSubItems)
                 {
-                    foreach (var item in store.Value.ToList())
+                    // for some reason CargoManager.SoldItem is never cleared by the server, I've added a check to SellItems that ignores all
+                    // sold items that are removed so they should be discarded on the next message
+                    var prevSoldItems = new Dictionary<Identifier, List<SoldItem>>(CargoManager.SoldItems);
+                    foreach (var store in prevSoldItems)
                     {
-                        CargoManager.ModifyItemQuantityInSubSellCrate(store.Key, item.ItemPrefab, item.Quantity, sender);
+                        CargoManager.BuyBackSoldItems(store.Key, store.Value.ToList(), sender);
+                    }
+                    foreach (var store in soldItems)
+                    {
+                        CargoManager.SellItems(store.Key, store.Value.ToList(), sender);
+                    }
+                }
+                else if (allowedToSellInventoryItems || allowedToSellSubItems)
+                {
+                    var prevSoldItems = new Dictionary<Identifier, List<SoldItem>>(CargoManager.SoldItems);
+                    foreach (var store in prevSoldItems)
+                    {
+                        store.Value.RemoveAll(predicate);
+                        CargoManager.BuyBackSoldItems(store.Key, store.Value.ToList(), sender);
+                    }
+                    foreach (var store in soldItems)
+                    {
+                        store.Value.RemoveAll(predicate);
+                    }
+                    foreach (var store in soldItems)
+                    {
+                        CargoManager.SellItems(store.Key, store.Value.ToList(), sender);
+                    }
+                    bool predicate(SoldItem i) => allowedToSellInventoryItems != (i.Origin == SoldItem.SellOrigin.Character);
+                }
+            }
+            else
+            {
+                GameServer.Log($"{sender.Name} attempted to buy or sell items without having access to a store NPC.", ServerLog.MessageType.Error);
+            }
+
+            if ((purchasedUpgrades.Any() || purchasedItemSwaps.Any()) &&
+                HasCampaignInteractionAvailable(sender, InteractionType.Upgrade))
+            {
+                var characterList = GameSession.GetSessionCrewCharacters(CharacterType.Both);
+                foreach (var (prefab, category, _) in purchasedUpgrades)
+                {
+                    UpgradeManager.TryPurchaseUpgrade(prefab, category, client: sender);
+                    // unstable logging
+                    int price = prefab.Price.GetBuyPrice(prefab, UpgradeManager.GetUpgradeLevel(prefab, category), Map?.CurrentLocation, characterList);
+                    int level = UpgradeManager.GetUpgradeLevel(prefab, category);
+                    GameServer.Log($"SERVER: Purchased level {level} {category.Identifier}.{prefab.Identifier} for {price}", ServerLog.MessageType.ServerMessage);
+                }
+                foreach (var purchasedItemSwap in purchasedItemSwaps)
+                {
+                    if (purchasedItemSwap.ItemToInstall == null)
+                    {
+                        UpgradeManager.CancelItemSwap(purchasedItemSwap.ItemToRemove, client: sender);
+                    }
+                    else
+                    {
+                        UpgradeManager.PurchaseItemSwap(purchasedItemSwap.ItemToRemove, purchasedItemSwap.ItemToInstall, client: sender);
+                    }
+                }
+                foreach (Item item in Item.ItemList)
+                {
+                    if (item.PendingItemSwap != null && !purchasedItemSwaps.Any(it => it.ItemToRemove == item))
+                    {
+                        UpgradeManager.CancelItemSwap(item);
+                        item.PendingItemSwap = null;
                     }
                 }
             }
+            else
+            {
+                GameServer.Log($"{sender.Name} attempted to buy upgrades without having access to an NPC offering upgrades.", ServerLog.MessageType.Error);
+            }
+        }
 
-            bool allowedToSellInventoryItems = AllowedToManageCampaign(sender, ClientPermissions.SellInventoryItems);
-            if (allowedToSellInventoryItems && allowedToSellSubItems)
+        private bool HasCampaignInteractionAvailable(Client sender, InteractionType interactionType)
+        {
+            if (sender.Character == null || sender.Character.IsIncapacitated) { return false; }
+            if (GameMain.Server?.ServerSettings is { AllowRemoteCampaignInteractions: true }) { return true; }
+            foreach (var otherCharacter in Character.CharacterList)
             {
-                // for some reason CargoManager.SoldItem is never cleared by the server, I've added a check to SellItems that ignores all
-                // sold items that are removed so they should be discarded on the next message
-                var prevSoldItems = new Dictionary<Identifier, List<SoldItem>>(CargoManager.SoldItems);
-                foreach (var store in prevSoldItems)
+                if (otherCharacter.CampaignInteractionType != interactionType) { continue; }
+                //larger-than default maximum distance to give legit clients some leeway if their position is a bit off
+                if (sender.Character.CanInteractWith(otherCharacter, maxDist: 250.0f))
                 {
-                    CargoManager.BuyBackSoldItems(store.Key, store.Value.ToList(), sender);
-                }
-                foreach (var store in soldItems)
-                {
-                    CargoManager.SellItems(store.Key, store.Value.ToList(), sender);
+                    return true;
                 }
             }
-            else if (allowedToSellInventoryItems || allowedToSellSubItems)
-            {
-                var prevSoldItems = new Dictionary<Identifier, List<SoldItem>>(CargoManager.SoldItems);
-                foreach (var store in prevSoldItems)
-                {
-                    store.Value.RemoveAll(predicate);
-                    CargoManager.BuyBackSoldItems(store.Key, store.Value.ToList(), sender);
-                }
-                foreach (var store in soldItems)
-                {
-                    store.Value.RemoveAll(predicate);
-                }
-                foreach (var store in soldItems)
-                {
-                    CargoManager.SellItems(store.Key, store.Value.ToList(), sender);
-                }
-                bool predicate(SoldItem i) => allowedToSellInventoryItems != (i.Origin == SoldItem.SellOrigin.Character);
-            }
-
-            var characterList = GameSession.GetSessionCrewCharacters(CharacterType.Both);
-            foreach (var (prefab, category, _) in purchasedUpgrades)
-            {
-                UpgradeManager.PurchaseUpgrade(prefab, category, client: sender);
-
-                // unstable logging
-                int price = prefab.Price.GetBuyPrice(prefab, UpgradeManager.GetUpgradeLevel(prefab, category), Map?.CurrentLocation, characterList);
-                int level = UpgradeManager.GetUpgradeLevel(prefab, category);
-                GameServer.Log($"SERVER: Purchased level {level} {category.Identifier}.{prefab.Identifier} for {price}", ServerLog.MessageType.ServerMessage);
-            }
-            foreach (var purchasedItemSwap in purchasedItemSwaps)
-            {
-                if (purchasedItemSwap.ItemToInstall == null)
-                {
-                    UpgradeManager.CancelItemSwap(purchasedItemSwap.ItemToRemove);
-                }
-                else
-                {
-                    UpgradeManager.PurchaseItemSwap(purchasedItemSwap.ItemToRemove, purchasedItemSwap.ItemToInstall, client: sender);
-                }
-            }
-            foreach (Item item in Item.ItemList)
-            {
-                if (item.PendingItemSwap != null && !purchasedItemSwaps.Any(it => it.ItemToRemove == item))
-                {
-                    UpgradeManager.CancelItemSwap(item);
-                    item.PendingItemSwap = null;
-                }
-            }
+            return false;
         }
 
         public void ServerReadMoney(IReadMessage msg, Client sender)
@@ -1165,51 +1227,77 @@ namespace Barotrauma
 
             if (!AllowedToManageWallets(sender)) { return; }
 
-            Character targetCharacter = Character.CharacterList.FirstOrDefault(c => c.ID == update.Target);
-            targetCharacter?.Wallet.SetRewardDistribution(update.NewRewardDistribution);
-            GameServer.Log($"{sender.Name} changed the salary of {targetCharacter?.Name ?? "the bank"} to {update.NewRewardDistribution}%.", ServerLog.MessageType.Money);
+            if (update.Target.TryUnwrap(out ushort id))
+            {
+                Character targetCharacter = Character.CharacterList.FirstOrDefault(c => c.ID == id);
+                targetCharacter?.Wallet.SetRewardDistribution(update.NewRewardDistribution);
+                GameServer.Log($"{sender.Name} changed the salary of {targetCharacter?.Name} to {update.NewRewardDistribution}%.", ServerLog.MessageType.Money);
+                return;
+            }
+
+            Bank.SetRewardDistribution(update.NewRewardDistribution);
+            GameServer.Log($"{sender.Name} changed the default salary to {update.NewRewardDistribution}%.", ServerLog.MessageType.Money);
+        }
+
+        public void ResetSalaries(Client sender)
+        {
+            if (!AllowedToManageWallets(sender)) { return; }
+
+            foreach (Character character in GameSession.GetSessionCrewCharacters(CharacterType.Player))
+            {
+                character.Wallet.SetRewardDistribution(Bank.RewardDistribution);
+            }
         }
 
         public void ServerReadCrew(IReadMessage msg, Client sender)
         {
-            int[] pendingHires = null;
+            UInt16[] pendingHires = null;
+            bool[] pendingToReserveBench = null;
+            Dictionary<int, BotStatus> existingBotsClient = null;
 
             bool updatePending = msg.ReadBoolean();
             if (updatePending)
             {
                 ushort pendingHireLength = msg.ReadUInt16();
-                pendingHires = new int[pendingHireLength];
+                pendingHires = new UInt16[pendingHireLength];
+                pendingToReserveBench = new bool[pendingHireLength];
                 for (int i = 0; i < pendingHireLength; i++)
                 {
-                    pendingHires[i] = msg.ReadInt32();
+                    pendingHires[i] = msg.ReadUInt16();
+                    pendingToReserveBench[i] = msg.ReadBoolean();
                 }
             }
-
+            
             bool validateHires = msg.ReadBoolean();
 
             bool renameCharacter = msg.ReadBoolean();
-            int renamedIdentifier = -1;
+            UInt16 renamedIdentifier = 0;
             string newName = null;
             bool existingCrewMember = false;
             if (renameCharacter)
             {
-                renamedIdentifier = msg.ReadInt32();
-                newName = msg.ReadString();
+                renamedIdentifier = msg.ReadUInt16();
+                newName = Client.SanitizeName(msg.ReadString());
                 existingCrewMember = msg.ReadBoolean();
+                if (!GameMain.Server.IsNameValid(sender, newName, clientRenamingSelf: renamedIdentifier == sender.CharacterInfo?.ID))
+                {
+                    renameCharacter = false;
+                }
             }
 
             bool fireCharacter = msg.ReadBoolean();
             int firedIdentifier = -1;
-            if (fireCharacter) { firedIdentifier = msg.ReadInt32(); }
+            if (fireCharacter) { firedIdentifier = msg.ReadUInt16(); }
 
             Location location = map?.CurrentLocation;
             CharacterInfo firedCharacter = null;
+            (ushort id, string newName) appliedRename = (Entity.NullEntityID, string.Empty);
 
-            if (location != null && AllowedToManageCampaign(sender, ClientPermissions.ManageHires))
+            if (location != null)
             {
-                if (fireCharacter)
+                if (fireCharacter && AllowedToManageCampaign(sender, ClientPermissions.ManageHires) && HasCampaignInteractionAvailable(sender, InteractionType.Crew))
                 {
-                    firedCharacter = CrewManager.GetCharacterInfos().FirstOrDefault(info => info.GetIdentifier() == firedIdentifier);
+                    firedCharacter = CrewManager.GetCharacterInfos(includeReserveBench: true).FirstOrDefault(info => info.ID == firedIdentifier);
                     if (firedCharacter != null && (firedCharacter.Character?.IsBot ?? true))
                     {
                         CrewManager.FireCharacter(firedCharacter);
@@ -1219,37 +1307,62 @@ namespace Barotrauma
                         DebugConsole.ThrowError($"Tried to fire an invalid character ({firedIdentifier})");
                     }
                 }
+                else
+                {
+                    GameServer.Log($"{sender.Name} attempted to fire a character without having access to an appropriate NPC.", ServerLog.MessageType.Error);
+                }
 
                 if (renameCharacter)
                 {
                     CharacterInfo characterInfo = null;
-                    if (existingCrewMember && CrewManager != null)
+                    if (AllowedToManageCampaign(sender, ClientPermissions.ManageHires))
                     {
-                        characterInfo = CrewManager.GetCharacterInfos().FirstOrDefault(info => info.GetIdentifierUsingOriginalName() == renamedIdentifier);
+                        if (existingCrewMember && CrewManager != null)
+                        {
+                            characterInfo = CrewManager.GetCharacterInfos(includeReserveBench: true).FirstOrDefault(info => info.ID == renamedIdentifier);
+                        }
+                        else if (!existingCrewMember && location.HireManager != null)
+                        {
+                            characterInfo = location.HireManager.AvailableCharacters.FirstOrDefault(info => info.ID == renamedIdentifier);
+                        }
+                        if (characterInfo != null && characterInfo != sender.CharacterInfo && !HasCampaignInteractionAvailable(sender, InteractionType.Crew))
+                        {
+                            GameServer.Log($"{sender.Name} attempted to rename a character without having access to an appropriate NPC.", ServerLog.MessageType.Error);
+                            characterInfo = null;
+                        }
                     }
-                    else if(!existingCrewMember && location.HireManager != null)
+                    else if (characterInfo == null && renamedIdentifier == sender.CharacterInfo?.ID)
                     {
-                        characterInfo = location.HireManager.AvailableCharacters.FirstOrDefault(info => info.GetIdentifierUsingOriginalName() == renamedIdentifier);
+                        characterInfo = sender.CharacterInfo;
                     }
-                    
-                    if (characterInfo != null && (characterInfo.Character?.IsBot ?? true))
+                    if (characterInfo != null &&
+                        (characterInfo.Character == null || characterInfo.Character is { IsBot: true } || (characterInfo.RenamingEnabled && characterInfo == sender.CharacterInfo)))
                     {
+                        GameServer.Log($"{sender.Name} renamed the character \"{characterInfo.Name}\" as \"{newName}\".", ServerLog.MessageType.ServerMessage);
                         if (existingCrewMember)
                         {
                             CrewManager.RenameCharacter(characterInfo, newName);
+                            if (characterInfo == sender.CharacterInfo)
+                            {
+                                //renaming is only allowed once
+                                characterInfo.RenamingEnabled = false;
+                            }
                         }
                         else
                         {
                             location.HireManager.RenameCharacter(characterInfo, newName);
                         }
+                        appliedRename = (characterInfo.ID, newName);
                     }
                     else
                     {
-                        DebugConsole.ThrowError($"Tried to rename an invalid character ({renamedIdentifier})");
+                        string errorMsg = $"Tried to rename an invalid character ({renamedIdentifier}, {characterInfo?.Name ?? "null"})";
+                        DebugConsole.ThrowError(errorMsg);
+                        GameMain.Server?.SendConsoleMessage(errorMsg, sender, Color.Red);
                     }
                 }
 
-                if (location.HireManager != null)
+                if (location.HireManager != null && HasCampaignInteractionAvailable(sender, InteractionType.Crew))
                 {
                     if (validateHires)
                     {
@@ -1262,20 +1375,24 @@ namespace Barotrauma
                     if (updatePending)
                     {
                         List<CharacterInfo> pendingHireInfos = new List<CharacterInfo>();
-                        foreach (int identifier in pendingHires)
+                        int i = 0;
+                        foreach (UInt16 identifier in pendingHires)
                         {
-                            CharacterInfo match = location.GetHireableCharacters().FirstOrDefault(info => info.GetIdentifierUsingOriginalName() == identifier);
+                            CharacterInfo match = location.GetHireableCharacters().FirstOrDefault(info => info.ID == identifier);
                             if (match == null)
                             {
                                 DebugConsole.ThrowError($"Tried to add a character that doesn't exist ({identifier}) to pending hires");
                                 continue;
                             }
+                            
+                            match.BotStatus = pendingToReserveBench[i++] ? BotStatus.PendingHireToReserveBench : BotStatus.PendingHireToActiveService;
+                            if (match.BotStatus == BotStatus.PendingHireToActiveService)
+                            {
+                                //can't add more bots to active service is max has been reached
+                                if (pendingHireInfos.Count(ci => ci.BotStatus == BotStatus.PendingHireToActiveService) + CrewManager.GetCharacterInfos().Count() >= CrewManager.MaxCrewSize) { continue; } 
+                            }
 
                             pendingHireInfos.Add(match);
-                            if (pendingHireInfos.Count + CrewManager.GetCharacterInfos().Count() >= CrewManager.MaxCrewSize)
-                            {
-                                break;
-                            }
                         }
                         location.HireManager.PendingHires = pendingHireInfos;
                     }
@@ -1288,12 +1405,16 @@ namespace Barotrauma
                         }
                     });
                 }
+                else
+                {
+                    GameServer.Log($"{sender.Name} attempted to hire characters without having access to an appropriate NPC.", ServerLog.MessageType.Error);
+                }
             }
 
             // bounce back
             if (renameCharacter && existingCrewMember)
             {
-                SendCrewState((renamedIdentifier, newName), firedCharacter);
+                SendCrewState(appliedRename, firedCharacter);
             }
             else
             {
@@ -1311,7 +1432,7 @@ namespace Barotrauma
         /// the client and the server when there's only one person on the server but when a second person joins both of
         /// their available hires are different from the server.
         /// </remarks>
-        public void SendCrewState((int id, string newName) renamedCrewMember = default, CharacterInfo firedCharacter = null)
+        public void SendCrewState((ushort id, string newName) renamedCrewMember = default, CharacterInfo firedCharacter = null, bool createNotification = true)
         {
             List<CharacterInfo> availableHires = new List<CharacterInfo>();
             List<CharacterInfo> pendingHires = new List<CharacterInfo>();
@@ -1327,6 +1448,8 @@ namespace Barotrauma
                 IWriteMessage msg = new WriteOnlyMessage();
                 msg.WriteByte((byte)ServerPacketHeader.CREW);
 
+                msg.WriteBoolean(createNotification);
+
                 msg.WriteUInt16((ushort)availableHires.Count);
                 foreach (CharacterInfo hire in availableHires)
                 {
@@ -1337,27 +1460,34 @@ namespace Barotrauma
                 msg.WriteUInt16((ushort)pendingHires.Count);
                 foreach (CharacterInfo pendingHire in pendingHires)
                 {
-                    msg.WriteInt32(pendingHire.GetIdentifierUsingOriginalName());
+                    msg.WriteUInt16(pendingHire.ID);
+                    msg.WriteBoolean(pendingHire.BotStatus == BotStatus.PendingHireToReserveBench);
                 }
 
-                var hiredCharacters = CrewManager.GetCharacterInfos().Where(ci => ci.IsNewHire);
-                msg.WriteUInt16((ushort)hiredCharacters.Count());
-                foreach (CharacterInfo info in hiredCharacters)
+                var crewManager = CrewManager.GetCharacterInfos();
+                msg.WriteUInt16((ushort)crewManager.Count());
+                foreach (CharacterInfo info in crewManager)
                 {
                     info.ServerWrite(msg);
-                    msg.WriteInt32(info.Salary);
+                }
+                
+                var reserveBench = CrewManager.GetReserveBenchInfos();
+                msg.WriteUInt16((ushort)reserveBench.Count());
+                foreach (CharacterInfo info in reserveBench)
+                {
+                    info.ServerWrite(msg);
                 }
 
-                bool validRenaming = renamedCrewMember.id > -1 && !string.IsNullOrEmpty(renamedCrewMember.newName);
+                bool validRenaming = renamedCrewMember.id > 0 && !string.IsNullOrEmpty(renamedCrewMember.newName);
                 msg.WriteBoolean(validRenaming);
                 if (validRenaming)
                 {
-                    msg.WriteInt32(renamedCrewMember.id);
+                    msg.WriteUInt16(renamedCrewMember.id);
                     msg.WriteString(renamedCrewMember.newName);
                 }
 
                 msg.WriteBoolean(firedCharacter != null);
-                if (firedCharacter != null) { msg.WriteInt32(firedCharacter.GetIdentifier()); }
+                if (firedCharacter != null) { msg.WriteUInt16(firedCharacter.ID); }
 
                 GameMain.Server.ServerPeer.Send(msg, client.Connection, DeliveryMethod.Reliable);
             }
@@ -1368,6 +1498,8 @@ namespace Barotrauma
             //disconnected clients can never purchase anything
             //(can happen e.g. if someone starts a vote to buy something and then disconnects)
             if (client != null && !GameMain.Server.ConnectedClients.Contains(client)) { return false; }
+
+            if (price == 0) { return true; }
 
             Wallet wallet = GetWallet(client);
             if (!AllowedToManageWallets(client))
@@ -1406,14 +1538,25 @@ namespace Barotrauma
             return wallet.Balance + Bank.Balance;
         }
 
-        public override void Save(XElement element)
+        /// <summary>
+        /// Serializes the campaign and character data to XML.
+        /// </summary>
+        /// <param name="element">Game session element to save the campaign data to.</param>
+        /// <param name="isSavingOnLoading">
+        /// Whether the save is being done during loading to ensure the campaign ID matches the one in the save file.
+        /// Used to work around some quirks with the backup save system.
+        /// See: <see cref="SaveUtil.SaveGame(CampaignDataPath,bool)"/>
+        /// </param>
+        public override void Save(XElement element, bool isSavingOnLoading)
         {
             element.Add(new XAttribute("campaignid", CampaignID));
             XElement modeElement = new XElement("MultiPlayerCampaign",
-                new XAttribute("purchasedlostshuttles", PurchasedLostShuttles),
-                new XAttribute("purchasedhullrepairs", PurchasedHullRepairs),
-                new XAttribute("purchaseditemrepairs", PurchasedItemRepairs),
+                new XAttribute("purchasedlostshuttles", PurchasedLostShuttlesInLatestSave),
+                new XAttribute("purchasedhullrepairs", PurchasedHullRepairsInLatestSave),
+                new XAttribute("purchaseditemrepairs", PurchasedItemRepairsInLatestSave),
                 new XAttribute("cheatsenabled", CheatsEnabled));
+
+            DebugConsole.NewMessage("Saved PurchasedHullRepairs: "+ PurchasedHullRepairs+" (in last save "+PurchasedHullRepairsInLatestSave+")", Color.Magenta);
 
             modeElement.Add(Settings.Save());
             modeElement.Add(SaveStats());
@@ -1426,6 +1569,14 @@ namespace Barotrauma
             if (GameMain.GameSession?.EventManager != null)
             {
                 modeElement.Add(GameMain.GameSession?.EventManager.Save());
+            }
+
+            foreach ((CharacterTeamType team, Identifier unlockedRecipe) in GameMain.GameSession.UnlockedRecipes)
+            {
+                modeElement.Add(
+                    new XElement("unlockedrecipe", 
+                    new XAttribute("identifier", unlockedRecipe),
+                    new XAttribute("team", team)));
             }
 
             CampaignMetadata?.Save(modeElement);
@@ -1456,8 +1607,16 @@ namespace Barotrauma
 
             element.Add(modeElement);
 
-            //save character data to a separate file
-            string characterDataPath = GetCharacterDataSavePath();
+            // save character data to a separate file
+
+            // When loading a campaign in multiplayer, we save the campaign to ensure the campaign ID that gets assigned
+            // matches the one in the save file, this is a problem with the backup save system since this causes the
+            // character data to save too, and we don't want to overwrite the main save file's character data.
+            // So we instead save over the load path in this case, which in backup saves is the backup file
+            // which we don't mind getting overriden since the data should be the same
+            string characterDataPath = isSavingOnLoading
+                                           ? GetCharacterDataPathForLoading()
+                                           : GetCharacterDataPathForSaving();
             XDocument characterDataDoc = new XDocument(new XElement("CharacterData"));
             foreach (CharacterCampaignData cd in characterData)
             {
@@ -1465,6 +1624,7 @@ namespace Barotrauma
             }
             try
             {
+                SaveUtil.DeleteIfExists(characterDataPath);
                 characterDataDoc.SaveSafe(characterDataPath);
             }
             catch (Exception e)
@@ -1474,6 +1634,58 @@ namespace Barotrauma
 
             lastSaveID++;
             DebugConsole.Log("Campaign saved, save ID " + lastSaveID);
+        }
+
+        /// <summary>
+        /// Load the current character save file and add/replace a single character's data with a new version immediately.
+        /// </summary>
+        /// <param name="newData">New character to insert. If it matches one existing in the save, that will get replaced.</param>
+        /// <param name="skipBackup">By default, replaced characters will be temporarily backed up, but that might be unwanted
+        /// eg. when using this method to save a character itself restored from the backup.</param>
+        public void SaveSingleCharacter(CharacterCampaignData newData, bool skipBackup = false)
+        {
+            string characterDataPath = GetCharacterDataPathForSaving();
+            if (!File.Exists(characterDataPath))
+            {
+                DebugConsole.ThrowError($"Failed to load the character data for the campaign. Could not find the file \"{characterDataPath}\".");
+            }
+            else
+            {
+                var loadedCharacterData = XMLExtensions.TryLoadXml(characterDataPath);
+                if (loadedCharacterData?.Root == null) { return; }
+                var oldData = loadedCharacterData.Root.Elements()
+                    .FirstOrDefault(subElement => new CharacterCampaignData(subElement).IsDuplicate(newData));
+                
+                if (oldData != null)
+                {
+                    if (!skipBackup)
+                    {
+                        replacedCharacterDataBackup.Add(new CharacterCampaignData(oldData));    
+                    }
+                    oldData.Remove();
+                }
+                loadedCharacterData.Root.Add(newData.Save());
+                
+                try
+                {
+                    loadedCharacterData.SaveSafe(characterDataPath);
+                }
+                catch (Exception e)
+                {
+                    DebugConsole.ThrowError("Saving multiplayer campaign characters to \"" + characterDataPath + "\" failed!", e);
+                }
+            }
+        }
+        
+        public CharacterCampaignData RestoreSingleCharacterFromBackup(Client client)
+        {
+            if (replacedCharacterDataBackup.Find(cd => cd.MatchesClient(client)) is CharacterCampaignData characterToRestore)
+            {
+                replacedCharacterDataBackup.Remove(characterToRestore);
+                return characterToRestore;
+            }
+            
+            return default;
         }
     }
 }

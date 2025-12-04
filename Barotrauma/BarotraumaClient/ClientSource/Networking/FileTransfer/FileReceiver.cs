@@ -256,11 +256,20 @@ namespace Barotrauma.Networking
                         }
 
                         string downloadFolder = downloadFolders[(FileTransferType)fileType];
+#if CLIENT && DEBUG
+                        if (GameClient.MultiClientTestMode)
+                        {
+                            //append the name of the client to the download folder to avoid multiple clients
+                            //from trying to download a file into the same path at the same time
+                            downloadFolder += "_" + GameMain.Client.Name;
+                        }
+#endif
+
                         if (!Directory.Exists(downloadFolder))
                         {
                             try
                             {
-                                Directory.CreateDirectory(downloadFolder);
+                                Directory.CreateDirectory(downloadFolder, catchUnauthorizedAccessExceptions: false);
                             }
                             catch (Exception e)
                             {
@@ -572,7 +581,7 @@ namespace Barotrauma.Networking
             {
                 try
                 {
-                    File.Delete(transfer.FilePath);
+                    File.Delete(transfer.FilePath, catchUnauthorizedAccessExceptions: false);
                 }
                 catch (Exception e)
                 {

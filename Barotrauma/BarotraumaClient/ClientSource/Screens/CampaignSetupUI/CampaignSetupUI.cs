@@ -5,11 +5,20 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
+using Barotrauma.Networking;
 
 namespace Barotrauma
 {
     abstract class CampaignSetupUI
     {
+        protected enum SaveSortingType
+        {
+            LastPlayedDescending, LastPlayedAscending,
+            NameDescending, NameAscending
+        }
+
+        private const SaveSortingType DefaultSaveSortingType = SaveSortingType.LastPlayedDescending;
+
         protected readonly GUIComponent newGameContainer, loadGameContainer;
 
         protected GUIListBox saveList;
@@ -19,7 +28,9 @@ namespace Barotrauma
         protected GUIButton loadGameButton;
 
         public Action<SubmarineInfo, string, string, CampaignSettings> StartNewGame;
-        public Action<string> LoadGame;
+
+        public delegate void LoadGameDelegate(string loadPath, Option<uint> backupIndex);
+        public LoadGameDelegate LoadGame;
 
         protected enum CategoryFilter { All = 0, Vanilla = 1, Custom = 2 }
         protected CategoryFilter subFilter = CategoryFilter.All;
@@ -108,24 +119,54 @@ namespace Barotrauma
             return saveFrame;
         }
 
-        protected void SortSaveList()
+        protected void SortSaveList(SaveSortingType sortingType = DefaultSaveSortingType) => saveList?.Content.RectTransform.SortChildren((rect1, rect2) =>
         {
-            saveList.Content.RectTransform.SortChildren((c1, c2) =>
+            if (rect1.GUIComponent.UserData is not CampaignMode.SaveInfo file1 || rect2.GUIComponent.UserData is not CampaignMode.SaveInfo file2) { return 0; }
+            if (!file1.SaveTime.TryUnwrap(out SerializableDateTime file1WriteTime) || !file2.SaveTime.TryUnwrap(out SerializableDateTime file2WriteTime)) { return 0; }
+            return sortingType switch
             {
-                if (c1.GUIComponent.UserData is not CampaignMode.SaveInfo file1
-                    || c2.GUIComponent.UserData is not CampaignMode.SaveInfo file2)
-                {
-                    return 0;
-                }
+                SaveSortingType.LastPlayedDescending => file2WriteTime.CompareTo(file1WriteTime),
+                SaveSortingType.LastPlayedAscending => file1WriteTime.CompareTo(file2WriteTime),
+                SaveSortingType.NameDescending => string.Compare(Path.GetFileNameWithoutExtension(file1.FilePath), Path.GetFileNameWithoutExtension(file2.FilePath), StringComparison.OrdinalIgnoreCase),
+                SaveSortingType.NameAscending => string.Compare(Path.GetFileNameWithoutExtension(file2.FilePath), Path.GetFileNameWithoutExtension(file1.FilePath), StringComparison.OrdinalIgnoreCase),
+                _ => 0
+            };
+        });
 
-                if (!file1.SaveTime.TryUnwrap(out var file1WriteTime)
-                    || !file2.SaveTime.TryUnwrap(out var file2WriteTime))
+        protected void CreateSaveFilteringHeader(GUIComponent parent)
+        {
+            GUILayoutGroup container = new(new RectTransform(Vector2.UnitX, parent.RectTransform), true) { Stretch = true };
+
+            GUI.CreateFilterBox(new RectTransform(new Vector2(0.6f, 1f), container.RectTransform)).OnTextChanged += (_, filterText) =>
+            {
+                filterText = filterText.Trim();
+                foreach (GUIComponent saveElement in saveList.Content.Children)
                 {
-                    return 0;
+                    if (saveElement.UserData is not CampaignMode.SaveInfo saveInfo) { continue; }
+                    saveElement.Visible = filterText.IsNullOrEmpty()
+                        || Path.GetFileNameWithoutExtension(saveInfo.FilePath).Contains(filterText, StringComparison.OrdinalIgnoreCase);
                 }
-                
-                return file2WriteTime.CompareTo(file1WriteTime);
-            });
+                return true;
+            };
+
+            SaveSortingType[] sortingTypes = Enum.GetValues<SaveSortingType>();
+            GUIDropDown dropDown = new(new RectTransform(new Vector2(0.4f, 1f), container.RectTransform), elementCount: sortingTypes.Length)
+            {
+                OnSelected = (_, data) =>
+                {
+                    SortSaveList((SaveSortingType)data);
+                    return true;
+                }
+            };
+
+            foreach (SaveSortingType sortingType in sortingTypes)
+            {
+                dropDown.AddItem(TextManager.Get($"SaveSortingType.{sortingType}"), sortingType);
+            }
+
+            dropDown.SelectItem(DefaultSaveSortingType);
+
+            container.RectTransform.MinSize = (0, container.Children.Max(child => child.Rect.Size.Y));
         }
         
         public struct CampaignSettingElements
@@ -142,6 +183,7 @@ namespace Barotrauma
             public SettingValue<float> OxygenMultiplier;
             public SettingValue<float> FuelMultiplier;
             public SettingValue<float> MissionRewardMultiplier;
+            public SettingValue<float> ExperienceRewardMultiplier;
             public SettingValue<float> ShopPriceMultiplier;
             public SettingValue<float> ShipyardPriceMultiplier;
             public SettingValue<float> RepairFailMultiplier;
@@ -164,6 +206,7 @@ namespace Barotrauma
                     OxygenMultiplier = OxygenMultiplier.GetValue(),
                     FuelMultiplier = FuelMultiplier.GetValue(),
                     MissionRewardMultiplier = MissionRewardMultiplier.GetValue(),
+                    ExperienceRewardMultiplier = ExperienceRewardMultiplier.GetValue(),
                     ShopPriceMultiplier = ShopPriceMultiplier.GetValue(),
                     ShipyardPriceMultiplier = ShipyardPriceMultiplier.GetValue(),
                     RepairFailMultiplier = RepairFailMultiplier.GetValue(),
@@ -341,6 +384,19 @@ namespace Barotrauma
                 verticalSize,
                 OnValuesChanged);
 
+            // Experience reward multiplier
+            CampaignSettings.MultiplierSettings experienceMultiplierSettings = CampaignSettings.GetMultiplierSettings("ExperienceRewardMultiplier");
+            SettingValue<float> experienceMultiplier = CreateGUIFloatInputCarousel(
+                settingsList.Content,
+                TextManager.Get("campaignoption.experiencerewardmultiplier"),
+                TextManager.Get("campaignoption.experiencerewardmultiplier.tooltip"),
+                prevSettings.ExperienceRewardMultiplier,
+                valueStep: experienceMultiplierSettings.Step,
+                minValue: experienceMultiplierSettings.Min,
+                maxValue: experienceMultiplierSettings.Max,
+                verticalSize,
+                OnValuesChanged);
+
             // Shop buying prices multiplier
             CampaignSettings.MultiplierSettings shopPriceMultiplierSettings = CampaignSettings.GetMultiplierSettings("ShopPriceMultiplier");
             SettingValue<float> shopPriceMultiplier = CreateGUIFloatInputCarousel(
@@ -498,6 +554,7 @@ namespace Barotrauma
                 oxygenMultiplier.SetValue(settings.OxygenMultiplier);
                 fuelMultiplier.SetValue(settings.FuelMultiplier);
                 rewardMultiplier.SetValue(settings.MissionRewardMultiplier);
+                experienceMultiplier.SetValue(settings.ExperienceRewardMultiplier);
                 shopPriceMultiplier.SetValue(settings.ShopPriceMultiplier);
                 shipyardPriceMultiplier.SetValue(settings.ShipyardPriceMultiplier);
                 repairFailMultiplier.SetValue(settings.RepairFailMultiplier);
@@ -527,6 +584,7 @@ namespace Barotrauma
                 OxygenMultiplier = oxygenMultiplier,
                 FuelMultiplier = fuelMultiplier,
                 MissionRewardMultiplier = rewardMultiplier,
+                ExperienceRewardMultiplier = experienceMultiplier,
                 ShopPriceMultiplier = shopPriceMultiplier,
                 ShipyardPriceMultiplier = shipyardPriceMultiplier,
                 RepairFailMultiplier = repairFailMultiplier,
@@ -820,6 +878,120 @@ namespace Barotrauma
             });
 
             return true;
+        }
+
+        protected void CreateBackupMenu(IEnumerable<SaveUtil.BackupIndexData> indexData, Action<SaveUtil.BackupIndexData> loadBackup)
+        {
+            var backupPopup = new GUIMessageBox("", "", new[] { TextManager.Get("Load"), TextManager.Get("Cancel") }, new Vector2(0.3f, 0.5f), minSize: new Point(500, 500));
+
+            GUILayoutGroup campaignSettingContent = new GUILayoutGroup(new RectTransform(new Vector2(1f, 0.8f), backupPopup.Content.RectTransform, Anchor.TopCenter));
+
+            GUIListBox backupList = new GUIListBox(new RectTransform(Vector2.One, campaignSettingContent.RectTransform));
+
+            bool isIronman = GameMain.NetworkMember?.ServerSettings is { IronmanModeActive: true };
+
+            if (!indexData.Any() || isIronman)
+            {
+                LocalizedString errorMsg = isIronman
+                                               ? TextManager.Get("ironmanmodebackupdisclaimer")
+                                               : TextManager.Get("nobackups");
+                var errorBlock = new GUITextBlock(new RectTransform(Vector2.One, campaignSettingContent.RectTransform), errorMsg, font: GUIStyle.SubHeadingFont, textAlignment: Alignment.Center)
+                {
+                    TextColor = GUIStyle.Red,
+                    IgnoreLayoutGroups = true
+                };
+
+                if (errorBlock.Font.MeasureString(errorMsg).X > campaignSettingContent.Rect.Width)
+                {
+                    errorBlock.Wrap = true;
+                    errorBlock.SetTextPos();
+                }
+            }
+
+            if (!isIronman)
+            {
+                foreach (var data in indexData.OrderByDescending(static i => i.SaveTime))
+                {
+                    GUIFrame indexFrame = new GUIFrame(
+                        new RectTransform(new Vector2(1.0f, 1f / SaveUtil.MaxBackupCount), backupList.Content.RectTransform), style: "ListBoxElement")
+                    {
+                        UserData = data
+                    };
+
+                    GUILayoutGroup indexLayout = new GUILayoutGroup(
+                        new RectTransform(Vector2.One, indexFrame.RectTransform),
+                        isHorizontal: true,
+                        childAnchor: Anchor.CenterLeft)
+                    {
+                        RelativeSpacing = 0.05f,
+                        Stretch = true
+                    };
+
+                    GUILayoutGroup leftLayout = new GUILayoutGroup(new RectTransform(new Vector2(0.5f, 0.8f), indexLayout.RectTransform), childAnchor: Anchor.TopCenter)
+                    {
+                        RelativeSpacing = 0.05f,
+                        Stretch = true
+                    };
+
+                    LocalizedString locationName = data.LocationType.IsEmpty || data.LocationNameIdentifier.IsEmpty ?
+                        TextManager.Get("unknown") :
+                        Location.GetName(data.LocationType, data.LocationNameFormatIndex, data.LocationNameIdentifier);
+
+                    var locationNameBlock = new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.5f), leftLayout.RectTransform), locationName, textAlignment: Alignment.CenterLeft)
+                    {
+                        TextColor = Color.White
+                    };
+
+                    new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.5f), leftLayout.RectTransform), TextManager.Get($"savestate.{data.LevelType}"), textAlignment: Alignment.CenterLeft);
+
+
+                    GUILayoutGroup rightLayout = new GUILayoutGroup(new RectTransform(new Vector2(0.5f, 0.8f), indexLayout.RectTransform), childAnchor: Anchor.TopCenter)
+                    {
+                        RelativeSpacing = 0.05f,
+                        Stretch = true
+                    };
+
+                    TimeSpan difference = SerializableDateTime.UtcNow - data.SaveTime;
+
+                    double totalMinutes = difference.TotalMinutes;
+
+                    LocalizedString timeFormat = totalMinutes switch
+                    {
+                        < 1  => TextManager.Get("subeditor.savedjustnow"),
+                        > 60 => TextManager.GetWithVariable("saveagehours", "[hours]", ((int)Math.Floor(difference.TotalHours)).ToString()),
+                        _    => TextManager.GetWithVariable("subeditor.saveageminutes", "[minutes]", difference.Minutes.ToString())
+                    };
+
+                    new GUITextBlock(new RectTransform(Vector2.One, rightLayout.RectTransform), timeFormat, textAlignment: Alignment.CenterRight);
+
+                    locationNameBlock.Text = ToolBox.LimitString(locationName, locationNameBlock.Font, locationNameBlock.Rect.Width);
+                }
+            }
+
+            backupList.AfterSelected = (selected, _) =>
+            {
+                // to my understanding, there's no way to unselect an item in a GUIListBox
+                // so no need to check if selected is null
+                backupPopup.Buttons[0].Enabled = true;
+                return true;
+            };
+
+            backupPopup.Buttons[1].OnClicked += (button, o) =>
+            {
+                backupPopup.Close();
+                return true;
+            };
+
+            backupPopup.Buttons[0].Enabled = false;
+            backupPopup.Buttons[0].OnClicked += (button, o) =>
+            {
+                if (backupList.SelectedComponent?.UserData is not SaveUtil.BackupIndexData selectedIndexData) { return false; }
+
+                backupPopup.Close();
+
+                loadBackup?.Invoke(selectedIndexData);
+                return true;
+            };
         }
     }
 }

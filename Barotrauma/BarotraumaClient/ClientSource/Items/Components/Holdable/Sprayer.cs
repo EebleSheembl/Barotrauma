@@ -216,6 +216,7 @@ namespace Barotrauma.Items.Components
         public override void DrawHUD(SpriteBatch spriteBatch, Character character)
         {
             if (character == null || !character.IsKeyDown(InputType.Aim)) { return; }
+            base.DrawHUD(spriteBatch, character);
             GUI.HideCursor = targetSections.Count > 0;
         }
 
@@ -237,11 +238,11 @@ namespace Barotrauma.Items.Components
 
         public void Spray(Character user, float deltaTime, bool applyColors)
         {
-            Item liquidItem = liquidContainer?.Inventory.FirstOrDefault();
+            Item liquidItem = LiquidContainer?.Inventory.FirstOrDefault();
             if (liquidItem == null) { return; }
 
             bool isCleaning = false;
-            liquidColors.TryGetValue(liquidItem.Prefab.Identifier, out color);
+            LiquidColors.TryGetValue(liquidItem.Prefab.Identifier, out color);
 
             if (applyColors && targetSections.Any())
             {

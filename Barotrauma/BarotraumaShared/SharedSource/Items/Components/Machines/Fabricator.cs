@@ -206,7 +206,7 @@ namespace Barotrauma.Items.Components
         private void StartFabricating(FabricationRecipe selectedItem, Character user, bool addToServerLog = true)
         {
             if (selectedItem == null) { return; }
-            if (!outputContainer.Inventory.CanBePut(selectedItem.TargetItem, selectedItem.OutCondition * selectedItem.TargetItem.Health)) { return; }
+            if (!outputContainer.Inventory.CanProbablyBePut(selectedItem.TargetItem, selectedItem.OutCondition * selectedItem.TargetItem.Health)) { return; }
 
             IsActive = true;
             this.user = user;
@@ -319,7 +319,7 @@ namespace Barotrauma.Items.Components
             }
             else
             {
-                hasPower = Voltage >= MinVoltage;
+                hasPower = HasPower;
 
                 if (!hasPower)
                 {
@@ -499,12 +499,13 @@ namespace Barotrauma.Items.Components
                     {
                         GameAnalyticsManager.AddDesignEvent("ItemFabricated:" + (GameMain.GameSession?.GameMode?.Preset.Identifier.Value ?? "none") + ":" + fabricatedItem.TargetItem.Identifier);
                     }
+                    InvSlotType invSlot = fabricatedItem.MoveToSlot;
                     if (i < amountFittingContainer)
                     {
                         Entity.Spawner.AddItemToSpawnQueue(fabricatedItem.TargetItem, outputContainer.Inventory, fabricatedItem.TargetItem.Health * outCondition, quality,
                             onSpawned: (Item spawnedItem) =>
                             {
-                                onItemSpawned(spawnedItem, tempUser);
+                                onItemSpawned(spawnedItem, tempUser, invSlot);
                                 spawnedItem.Quality = quality;
                                 spawnedItem.StolenDuringRound = ingredientsStolen;
                                 spawnedItem.AllowStealing = ingredientsAllowStealing;
@@ -517,7 +518,7 @@ namespace Barotrauma.Items.Components
                         Entity.Spawner.AddItemToSpawnQueue(fabricatedItem.TargetItem, item.Position, item.Submarine, fabricatedItem.TargetItem.Health * outCondition, quality,
                             onSpawned: (Item spawnedItem) =>
                             {
-                                onItemSpawned(spawnedItem, tempUser);
+                                onItemSpawned(spawnedItem, tempUser, invSlot);
                                 spawnedItem.Quality = quality;
                                 spawnedItem.StolenDuringRound = ingredientsStolen;
                                 spawnedItem.AllowStealing = ingredientsAllowStealing;
@@ -527,14 +528,27 @@ namespace Barotrauma.Items.Components
                     }
                 }
 
-                void onItemSpawned(Item spawnedItem, Character user)
+                void onItemSpawned(Item spawnedItem, Character user, InvSlotType slot)
                 {
-                    if (user != null && user.TeamID != CharacterTeamType.None)
+                    CharacterTeamType teamID = CharacterTeamType.None;
+                    if (user != null)
+                    {
+                        teamID = user.TeamID;
+                    }
+                    else if (item.Submarine != null)
+                    {
+                        teamID = item.Submarine.TeamID;
+                    }
+                    if (teamID != CharacterTeamType.None)
                     {
                         foreach (WifiComponent wifiComponent in spawnedItem.GetComponents<WifiComponent>())
                         {
-                            wifiComponent.TeamID = user.TeamID;
+                            wifiComponent.TeamID = teamID;
                         }
+                    }
+                    if (slot != InvSlotType.None)
+                    {
+                        user?.Inventory.TryPutItem(spawnedItem, user, slot.ToEnumerable());
                     }
                     OnItemFabricated?.Invoke(spawnedItem, user);
                 }
@@ -562,7 +576,6 @@ namespace Barotrauma.Items.Components
                     StartFabricating(prevFabricatedItem, prevUser, addToServerLog: false);
                 }
             }
-
         }
 
         /// <summary>
@@ -707,24 +720,37 @@ namespace Barotrauma.Items.Components
 
         private static bool AnyOneHasRecipeForItem(Character user, ItemPrefab item)
         {
+            CharacterType mustHaveRecipe = GameMain.GameSession?.GameMode is { IsSinglePlayer: true } ?
+                //in single player it doesn't matter if it's a bot or a player who has the recipe 
+                //(the bots can turn into a "player" when switching characters, and that could interrupt the fabrication)
+                CharacterType.Both : 
+                //in MP the recipes other players have don't cound
+                CharacterType.Bot;
             return
                 (user != null && user.HasRecipeForItem(item.Identifier)) ||
-                GameSession.GetSessionCrewCharacters(CharacterType.Bot).Any(c => c.HasRecipeForItem(item.Identifier));
+                GameSession.GetSessionCrewCharacters(mustHaveRecipe).Any(c => c.HasRecipeForItem(item.Identifier));
         }
 
         private readonly HashSet<Item> usedIngredients = new HashSet<Item>();
 
-        private bool CanBeFabricated(FabricationRecipe fabricableItem, IReadOnlyDictionary<Identifier, List<Item>> availableIngredients, Character character)
+        public bool MissingRequiredRecipe(FabricationRecipe fabricableItem, Character character)
         {
-            if (fabricableItem == null) { return false; }
-            if (fabricableItem.RequiresRecipe) 
+            if (fabricableItem.RequiresRecipe)
             {
                 if (character == null) { return false; }
                 if (!AnyOneHasRecipeForItem(character, fabricableItem.TargetItem))
                 {
-                    return false; 
+                    return true;
                 }
             }
+            return false;
+        }
+
+        private bool CanBeFabricated(FabricationRecipe fabricableItem, IReadOnlyDictionary<Identifier, List<Item>> availableIngredients, Character character)
+        {
+            if (fabricableItem == null) { return false; }
+
+            if (MissingRequiredRecipe(fabricableItem, character)) { return false; }
 
             if (fabricableItem.HideForNonTraitors)
             {
@@ -986,9 +1012,9 @@ namespace Barotrauma.Items.Components
             return componentElement;
         }
 
-        public override void Load(ContentXElement componentElement, bool usePrefabValues, IdRemap idRemap)
+        public override void Load(ContentXElement componentElement, bool usePrefabValues, IdRemap idRemap, bool isItemSwap)
         {
-            base.Load(componentElement, usePrefabValues, idRemap);
+            base.Load(componentElement, usePrefabValues, idRemap, isItemSwap);
             savedFabricatedItem = componentElement.GetAttributeString("fabricateditemidentifier", "");
             savedTimeUntilReady = componentElement.GetAttributeFloat("savedtimeuntilready", 0.0f);
             savedRequiredTime = componentElement.GetAttributeFloat("savedrequiredtime", 0.0f);

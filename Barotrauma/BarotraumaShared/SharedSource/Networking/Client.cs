@@ -1,7 +1,6 @@
-using Microsoft.Xna.Framework;
+﻿using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace Barotrauma.Networking
 {
@@ -10,6 +9,7 @@ namespace Barotrauma.Networking
     {
         public string Name;
         public Identifier PreferredJob;
+        public CharacterTeamType TeamID;
         public CharacterTeamType PreferredTeam;
         public UInt16 NameId;
         public AccountInfo AccountInfo;
@@ -51,7 +51,23 @@ namespace Barotrauma.Networking
 
         public Identifier PreferredJob;
 
-        public CharacterTeamType TeamID;
+        private CharacterTeamType teamID;
+        public CharacterTeamType TeamID
+        {
+            get { return teamID; }
+            set
+            {
+                if (value != teamID)
+                {
+                    DebugConsole.Log($"Changed client {Name}'s team to {teamID}.");
+                    if (GameMain.NetworkMember != null && GameMain.NetworkMember.IsServer)
+                    {
+                        GameMain.NetworkMember.LastClientListUpdateID++;
+                    }
+                    teamID = value;
+                }
+            }
+        }
 
         public CharacterTeamType PreferredTeam;
 
@@ -74,13 +90,6 @@ namespace Barotrauma.Networking
                     if (value != null)
                     {
                         CharacterID = value.ID;
-                    }
-                }
-                else
-                {
-                    if (value != null)
-                    {
-                        DebugConsole.NewMessage(value.Name, Color.Yellow);
                     }
                 }
                 character = value;
@@ -256,12 +265,15 @@ namespace Barotrauma.Networking
             SetPermissions(permissions, permittedCommands);
         }
 
-        public static string SanitizeName(string name)
+        /// <summary>
+        /// Strips out newlines and some common non-renderable symbols (ASCII codes below 32) out of the name, and optionally limits the maximum size.
+        /// </summary>
+        public static string SanitizeName(string name, int maxLength = MaxNameLength)
         {
-            name = name.Trim();
-            if (name.Length > MaxNameLength)
+            name = name.Trim().Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ');
+            if (name.Length > maxLength)
             {
-                name = name.Substring(0, MaxNameLength);
+                name = name.Substring(0, maxLength);
             }
             string rName = "";
             for (int i = 0; i < name.Length; i++)

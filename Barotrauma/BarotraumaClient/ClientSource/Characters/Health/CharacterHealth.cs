@@ -31,8 +31,7 @@ namespace Barotrauma
         }
 
         public static Sprite DamageOverlay => DamageOverlayPrefab.Prefabs.ActivePrefab.DamageOverlay;
-
-
+        
         private Point screenResolution;
 
         private float uiScale, inventoryScale;
@@ -105,6 +104,12 @@ namespace Barotrauma
         private GUILayoutGroup treatmentLayout;
         private GUIListBox recommendedTreatmentContainer;
 
+        /// <summary>
+        /// Timer for updating visuals (limb tints and overlays) caused by the affliction 
+        /// </summary>
+        private float updateVisualsTimer = Rand.Range(0.0f, UpdateVisualsInterval);
+        const float UpdateVisualsInterval = 0.5f;
+
         private float distortTimer;
 
         // 0-1
@@ -152,8 +157,7 @@ namespace Barotrauma
 
                 if (value == null &&
                     Character.Controlled?.SelectedCharacter?.CharacterHealth != null &&
-                    Character.Controlled.SelectedCharacter.CharacterHealth == prevOpenHealthWindow/* &&
-                    !Character.Controlled.SelectedCharacter.CanInventoryBeAccessed*/)
+                    Character.Controlled.SelectedCharacter.CharacterHealth == prevOpenHealthWindow)
                 {
                     Character.Controlled.DeselectCharacter();
                 }
@@ -217,7 +221,7 @@ namespace Barotrauma
             new GUICustomComponent(new RectTransform(new Vector2(0.2f, 1.0f), nameContainer.RectTransform, Anchor.CenterLeft),
                 onDraw: (spriteBatch, component) =>
                 {
-                    character.Info?.DrawPortrait(spriteBatch, new Vector2(component.Rect.X, component.Rect.Center.Y - component.Rect.Width / 2), Vector2.Zero, component.Rect.Width, false, character != Character.Controlled);
+                    character.Info?.DrawIcon(spriteBatch, component.Rect.Center.ToVector2(), component.Rect.Size.ToVector2());
                 });
             characterName = new GUITextBlock(new RectTransform(new Vector2(0.6f, 1.0f), nameContainer.RectTransform), "", textAlignment: Alignment.CenterLeft, font: GUIStyle.SubHeadingFont)
             {
@@ -462,15 +466,17 @@ namespace Barotrauma
         private void OnAttacked(Character attacker, AttackResult attackResult)
         {
             if (Math.Abs(attackResult.Damage) < 0.01f) { return; }
-            DamageOverlayTimer = MathHelper.Clamp(attackResult.Damage / MaxVitality, DamageOverlayTimer, 1.0f);
-            if (healthShadowDelay <= 0.0f) { healthShadowDelay = 1.0f; }
 
+            if (ShowDamageOverlay)
+            {
+                DamageOverlayTimer = MathHelper.Clamp(attackResult.Damage / MaxVitality, DamageOverlayTimer, 1.0f);
+                float additionalIntensity = MathHelper.Lerp(0, 1, MathUtils.InverseLerp(0, 0.1f, attackResult.Damage / MaxVitality));
+                damageIntensity = MathHelper.Clamp(damageIntensity + additionalIntensity, 0, 1);
+            }
+            
+            if (healthShadowDelay <= 0.0f) { healthShadowDelay = 1.0f; }
             if (healthBarPulsateTimer <= 0.0f) { healthBarPulsatePhase = 0.0f; }
             healthBarPulsateTimer = 1.0f;
-
-            float additionalIntensity = MathHelper.Lerp(0, 1, MathUtils.InverseLerp(0, 0.1f, attackResult.Damage / MaxVitality));
-            damageIntensity = MathHelper.Clamp(damageIntensity + additionalIntensity, 0, 1);
-
             DisplayVitalityDelay = 0.5f;
         }
 
@@ -1035,8 +1041,35 @@ namespace Barotrauma
             foreach (KeyValuePair<Affliction, LimbHealth> kvp in afflictions)
             {
                 var affliction = kvp.Key;
-                affliction.Prefab.AfflictionOverlay?.Draw(spriteBatch, Vector2.Zero, Color.White * affliction.GetAfflictionOverlayMultiplier(), Vector2.Zero, 0.0f,
-                    new Vector2(GameMain.GraphicsWidth / DamageOverlay.size.X, GameMain.GraphicsHeight / DamageOverlay.size.Y));
+                if (affliction.Prefab is AfflictionPrefab { AfflictionOverlay: not null } afflictionPrefab)
+                {
+                    Vector2 screenSize = new Vector2(GameMain.GraphicsWidth, GameMain.GraphicsHeight);
+                    if (afflictionPrefab.AfflictionOverlay is SpriteSheet spriteSheet)
+                    {
+                        spriteSheet.Draw(spriteBatch,
+                            spriteIndex: spriteSheet.GetAnimatedSpriteIndex(afflictionPrefab.AfflictionOverlayAnimSpeed),
+                            pos: Vector2.Zero,
+                            color: Color.White * affliction.GetAfflictionOverlayMultiplier(),
+                            origin: Vector2.Zero,
+                            rotate: 0,
+                            scale: screenSize / spriteSheet.FrameSize.ToVector2());
+                    }
+                    else if (afflictionPrefab.AfflictionOverlay is Sprite sprite)
+                    {
+                        sprite.Draw(spriteBatch,
+                            pos: Vector2.Zero,
+                            color: Color.White * affliction.GetAfflictionOverlayMultiplier(),
+                            origin: Vector2.Zero,
+                            rotate: 0,
+                            scale: screenSize / sprite.size);                        
+                    }
+                }
+
+                var activeEffect = affliction.GetActiveEffect();
+                if (activeEffect is { ThermalOverlayRange: > 0.0f })
+                {
+                    StatusHUD.DrawThermalOverlay(spriteBatch, Character, Character, activeEffect.ThermalOverlayColor, activeEffect.ThermalOverlayRange, effectState: (float)Timing.TotalTimeUnpaused, showDeadCharacters: false);
+                }
             }
 
             float damageOverlayAlpha = DamageOverlayTimer;
@@ -1131,6 +1164,8 @@ namespace Barotrauma
                     if (!statusIconVisibleTime.ContainsKey(afflictionPrefab)) { statusIconVisibleTime.Add(afflictionPrefab, 0.0f); }
                     statusIconVisibleTime[afflictionPrefab] += deltaTime;
 
+                    Color color = GetAfflictionIconColor(afflictionPrefab, affliction);
+
                     var matchingIcon = 
                         afflictionIconContainer.GetChildByUserData(afflictionPrefab) ?? 
                         hiddenAfflictionIconContainer.GetChildByUserData(afflictionPrefab);
@@ -1139,9 +1174,13 @@ namespace Barotrauma
                         matchingIcon = new GUIButton(new RectTransform(new Point(afflictionIconContainer.Rect.Height), afflictionIconContainer.RectTransform), style: null)
                         {
                             UserData = afflictionPrefab,
-                            ToolTip = affliction.Prefab.Name,
+                            ToolTip = $"‖color:{color.ToStringHex()}‖{affliction.Prefab.Name}‖color:end‖",
                             CanBeSelected = false
                         };
+                        if (affliction.Prefab.ShowDescriptionInTooltip)
+                        {
+                            matchingIcon.ToolTip = matchingIcon.ToolTip + "\n" + affliction.Prefab.GetDescription(affliction.Strength, AfflictionPrefab.Description.TargetType.Self);
+                        }
                         if (affliction == pressureAffliction)
                         {
                             matchingIcon.ToolTip = TextManager.Get("PressureHUDWarning");
@@ -1150,6 +1189,8 @@ namespace Barotrauma
                         {
                             matchingIcon.ToolTip = TextManager.Get("OxygenHUDWarning");
                         }
+                        matchingIcon.ToolTip = RichString.Rich(matchingIcon.ToolTip);
+
                         new GUIImage(new RectTransform(Vector2.One, matchingIcon.RectTransform, Anchor.BottomCenter), afflictionPrefab.Icon, scaleToFit: true)
                         {
                             CanBeFocused = false                            
@@ -1160,7 +1201,7 @@ namespace Barotrauma
                         matchingIcon.RectTransform.Parent = hiddenAfflictionIconContainer.RectTransform;
                     }
                     var image = matchingIcon.GetChild<GUIImage>();
-                    image.Color = GetAfflictionIconColor(afflictionPrefab, affliction);
+                    image.Color = color;
                     image.HoverColor = Color.Lerp(image.Color, Color.White, 0.5f);
 
                     if (affliction.DamagePerSecond > 1.0f && matchingIcon.FlashTimer <= 0.0f)
@@ -1381,7 +1422,7 @@ namespace Barotrauma
 
             recommendedTreatmentContainer.Content.ClearChildren();
 
-            float characterSkillLevel = Character.Controlled == null ? 0.0f : Character.Controlled.GetSkillLevel("medical");
+            float characterSkillLevel = Character.Controlled == null ? 0.0f : Character.Controlled.GetSkillLevel(Tags.MedicalSkill);
 
             //key = item identifier
             //float = suitability
@@ -1389,7 +1430,9 @@ namespace Barotrauma
             GetSuitableTreatments(treatmentSuitability,
                 user: Character.Controlled,
                 ignoreHiddenAfflictions: true,
-                limb: selectedLimbIndex == -1 ? null : Character.AnimController.Limbs.Find(l => l.HealthIndex == selectedLimbIndex));
+                limb: selectedLimbIndex == -1 ? null : Character.AnimController.Limbs.Find(l => l.HealthIndex == selectedLimbIndex),
+                checkTreatmentSuggestionThreshold: true,
+                checkTreatmentThreshold: false);
 
             foreach (Identifier treatment in treatmentSuitability.Keys.ToList())
             {
@@ -1532,9 +1575,9 @@ namespace Barotrauma
             };
 
             var description = new GUITextBlock(new RectTransform(new Vector2(1.0f, 0.3f), parent.RectTransform),
-                affliction.Prefab.GetDescription(
+                RichString.Rich(affliction.Prefab.GetDescription(
                     affliction.Strength, 
-                    Character == Character.Controlled ? AfflictionPrefab.Description.TargetType.Self : AfflictionPrefab.Description.TargetType.OtherCharacter), 
+                    Character == Character.Controlled ? AfflictionPrefab.Description.TargetType.Self : AfflictionPrefab.Description.TargetType.OtherCharacter)), 
                 textAlignment: Alignment.TopLeft, wrap: true)
             {
                 CanBeFocused = false
@@ -1950,7 +1993,6 @@ namespace Barotrauma
             }
         }
 
-
         private bool ShouldDisplayAfflictionOnLimb(KeyValuePair<Affliction, LimbHealth> kvp, LimbHealth limbHealth)
         {
             if (!kvp.Key.ShouldShowIcon(Character)) { return false; }
@@ -2059,23 +2101,23 @@ namespace Barotrauma
                 newAfflictions.Add((limbHealths[limbIndex], afflictionPrefab, afflictionStrength));
             }
 
-            foreach (KeyValuePair<Affliction, LimbHealth> kvp in afflictions)
+            foreach ((Affliction affliction, LimbHealth limbHealth) in afflictions)
             {
                 //deactivate afflictions that weren't included in the network message
-                if (!newAfflictions.Any(a => kvp.Key.Prefab == a.afflictionPrefab && kvp.Value == a.limb))
+                if (newAfflictions.None(a => affliction.Prefab == a.afflictionPrefab && limbHealth == a.limb))
                 {
-                    kvp.Key.Strength = 0.0f;
+                    affliction.Strength = 0.0f;
                 }
             }
 
             foreach (var (limb, afflictionPrefab, strength) in newAfflictions)
             {
                 Affliction existingAffliction = null;
-                foreach (KeyValuePair<Affliction, LimbHealth> kvp in afflictions)
+                foreach ((Affliction affliction, LimbHealth limbHealth) in afflictions)
                 {
-                    if (kvp.Key.Prefab == afflictionPrefab && kvp.Value == limb)
+                    if (affliction.Prefab == afflictionPrefab && limbHealth == limb)
                     {
-                        existingAffliction = kvp.Key;
+                        existingAffliction = affliction;
                         break;
                     }
                 }
@@ -2124,9 +2166,8 @@ namespace Barotrauma
 
             if (!Character.Params.Health.ApplyAfflictionColors) { return; }
 
-            foreach (KeyValuePair<Affliction, LimbHealth> kvp in afflictions)
+            foreach ((Affliction affliction, LimbHealth _) in afflictions)
             {
-                var affliction = kvp.Key;
                 Color faceTint = affliction.GetFaceTint();
                 if (faceTint.A > FaceTint.A) { FaceTint = faceTint; }
                 Color bodyTint = affliction.GetBodyTint();
@@ -2138,17 +2179,23 @@ namespace Barotrauma
         {
             foreach (Limb limb in Character.AnimController.Limbs)
             {
-                if (limb.HealthIndex < 0 || limb.HealthIndex >= limbHealths.Count) { continue; }
                 limb.BurnOverlayStrength = 0.0f;
                 limb.DamageOverlayStrength = 0.0f;
-                foreach (KeyValuePair<Affliction, LimbHealth> kvp in afflictions)
+            }
+
+            foreach ((Affliction affliction, LimbHealth limbHealth) in afflictions)
+            {
+                if (affliction.Prefab.BurnOverlayAlpha <= 0.0f && affliction.Prefab.DamageOverlayAlpha <= 0.0f) { continue; }
+
+                float burnStrength = affliction.Strength / Math.Min(affliction.Prefab.MaxStrength, 100) * affliction.Prefab.BurnOverlayAlpha;
+                float damageOverlayStrength = affliction.Strength / Math.Min(affliction.Prefab.MaxStrength, 100) * affliction.Prefab.DamageOverlayAlpha;
+                foreach (Limb limb in Character.AnimController.Limbs)
                 {
-                    var affliction = kvp.Key;
-                    float burnStrength = affliction.Strength / Math.Min(affliction.Prefab.MaxStrength, 100) * affliction.Prefab.BurnOverlayAlpha;
-                    if (kvp.Value == limbHealths[limb.HealthIndex] || !affliction.Prefab.LimbSpecific)
+                    if (limb.HealthIndex < 0 || limb.HealthIndex >= limbHealths.Count) { continue; }
+                    if (limbHealth == limbHealths[limb.HealthIndex] || !affliction.Prefab.LimbSpecific)
                     {
                         limb.BurnOverlayStrength += burnStrength;
-                        limb.DamageOverlayStrength += affliction.Strength / Math.Min(affliction.Prefab.MaxStrength, 100) * affliction.Prefab.DamageOverlayAlpha;
+                        limb.DamageOverlayStrength += damageOverlayStrength;
                     }
                     else
                     {

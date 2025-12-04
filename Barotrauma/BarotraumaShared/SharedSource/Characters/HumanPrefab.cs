@@ -2,6 +2,7 @@
 using Barotrauma.Extensions;
 using Barotrauma.Items.Components;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Xml.Linq;
 
@@ -32,6 +33,12 @@ namespace Barotrauma
 
         [Serialize(0, IsPropertySaveable.No)]
         public int ExperiencePoints { get; private set; }
+
+        [Serialize(0, IsPropertySaveable.No)]
+        public int BaseSalary { get; private set; }
+
+        [Serialize(1f, IsPropertySaveable.No)]
+        public float SalaryMultiplier { get; private set; }
 
         private readonly HashSet<Identifier> tags = new HashSet<Identifier>();
 
@@ -94,11 +101,20 @@ namespace Barotrauma
             }
         }
 
+        [Serialize(false, IsPropertySaveable.No, description: "If enabled, the NPC will not spawn if the specified spawn point tags can't be found.")]
+        public bool RequireSpawnPointTag { get; protected set; }
+
         [Serialize(CampaignMode.InteractionType.None, IsPropertySaveable.No)]
         public CampaignMode.InteractionType CampaignInteractionType { get; protected set; }
 
         [Serialize(AIObjectiveIdle.BehaviorType.Passive, IsPropertySaveable.No)]
         public AIObjectiveIdle.BehaviorType Behavior { get; protected set; }
+
+        [Serialize(1.0f, IsPropertySaveable.No, description: 
+            "Affects how far the character can hear sounds created by AI targets with the tag ProvocativeToHumanAI. "+
+            "Used as a multiplier on the sound range of the target, e.g. a value of 0.5 would mean a target with a sound range of 1000 would need to be within 500 units for this character to hear it. "+
+            "Only affects the \"fight intruders\" objective, which makes the character go and inspect noises.")]
+        public float Hearing { get; set; } = 1.0f;
 
         [Serialize(float.PositiveInfinity, IsPropertySaveable.No)]
         public float ReportRange { get; protected set; }
@@ -174,6 +190,7 @@ namespace Barotrauma
                         idleObjective.PreferredOutpostModuleTypes.Add(moduleType);
                     }
                 }
+                humanAI.ReportRange = Hearing;
                 humanAI.ReportRange = ReportRange;
                 humanAI.FindWeaponsRange = FindWeaponsRange;
                 humanAI.AimSpeed = AimSpeed;
@@ -235,14 +252,20 @@ namespace Barotrauma
                 foreach (var skill in characterInfo.Job.GetSkills())
                 {
                     float newSkill = skill.Level * SkillMultiplier;
-                    skill.IncreaseSkill(newSkill - skill.Level, increasePastMax: false);
+                    skill.IncreaseSkill(newSkill - skill.Level, canIncreasePastDefaultMaximumSkill: false);
                 }
-                characterInfo.Salary = characterInfo.CalculateSalary();
             }
+            characterInfo.Salary = characterInfo.CalculateSalary(BaseSalary, SalaryMultiplier);
             characterInfo.HumanPrefabIds = (NpcSetIdentifier, Identifier);
             characterInfo.GiveExperience(ExperiencePoints);
             return characterInfo;
         }
+        
+        /// <summary>
+        /// Items marked to be spawned infinitely (by NPCs).
+        /// </summary>
+        private readonly Dictionary<Identifier, ItemPrefab> infiniteItems = new();
+        public IReadOnlyCollection<ItemPrefab> InfiniteItems => infiniteItems.Values;
 
         public static void InitializeItem(Character character, ContentXElement itemElement, Submarine submarine, HumanPrefab humanPrefab, WayPoint spawnPoint = null, Item parentItem = null, bool createNetworkEvents = true)
         {
@@ -279,7 +302,7 @@ namespace Barotrauma
                     new List<InvSlotType>(item.GetComponent<Wearable>()?.AllowedSlots ?? item.GetComponent<Pickable>().AllowedSlots) :
                     new List<InvSlotType>(item.AllowedSlots);
                 allowedSlots.Remove(InvSlotType.Any);
-
+                item.UnequipAutomatically = false;
                 character.Inventory.TryPutItem(item, null, allowedSlots);
             }
             else
@@ -307,9 +330,13 @@ namespace Barotrauma
                 wifiComponent.TeamID = character.TeamID;
             }
             parentItem?.Combine(item, user: null);
+            if (itemElement.GetAttributeBool(nameof(JobPrefab.JobItem.Infinite), false))
+            { 
+                humanPrefab.infiniteItems.TryAdd(itemPrefab.Identifier, itemPrefab);
+            }
             foreach (ContentXElement childItemElement in itemElement.Elements())
             {
-                int amount = childItemElement.GetAttributeInt("amount", 1);
+                int amount = childItemElement.GetAttributeInt(nameof(JobPrefab.JobItem.Amount), 1);
                 for (int i = 0; i < amount; i++)
                 {
                     InitializeItem(character, childItemElement, submarine, humanPrefab, spawnPoint, item, createNetworkEvents);

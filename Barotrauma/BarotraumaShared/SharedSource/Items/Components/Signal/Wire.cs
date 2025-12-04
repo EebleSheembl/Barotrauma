@@ -66,6 +66,7 @@ namespace Barotrauma.Items.Components
         private float editNodeDelay;
 
         private bool locked;
+
         public bool Locked
         {
             get
@@ -82,6 +83,13 @@ namespace Barotrauma.Items.Components
         }
 
         public float Length { get; private set; }
+
+        [Serialize(0.3f, IsPropertySaveable.No), Editable(MinValueFloat = 0.01f, MaxValueFloat = 10.0f, DecimalCount = 2)]
+        public float Width
+        {
+            get;
+            set;
+        }
 
         [Serialize(5000.0f, IsPropertySaveable.No, description: "The maximum distance the wire can extend (in pixels).")]
         public float MaxLength
@@ -268,8 +276,10 @@ namespace Barotrauma.Items.Components
                     CreateNetworkEvent();
                 }
 #endif
-                //the wire is active if only one end has been connected
-                IsActive = connections[0] == null ^ connections[1] == null;
+                //the wire is active if it's currently being wired to something (in character inventory and connected from one end)
+                IsActive = 
+                    item.ParentInventory is CharacterInventory &&
+                    connections[0] == null ^ connections[1] == null;
             }
 
             Drawable = IsActive || nodes.Any();
@@ -543,9 +553,9 @@ namespace Barotrauma.Items.Components
             return new List<Vector2>(nodes);
         }
 
-        public void SetNodes(List<Vector2> nodes)
+        public void SetNodes(IEnumerable<Vector2> nodes)
         {
-            this.nodes = new List<Vector2>(nodes);
+            this.nodes = nodes.ToList();
             UpdateSections();
         }
 
@@ -839,9 +849,9 @@ namespace Barotrauma.Items.Components
             }
         }
         
-        public override void Load(ContentXElement componentElement, bool usePrefabValues, IdRemap idRemap)
+        public override void Load(ContentXElement componentElement, bool usePrefabValues, IdRemap idRemap, bool isItemSwap)
         {
-            base.Load(componentElement, usePrefabValues, idRemap);
+            base.Load(componentElement, usePrefabValues, idRemap, isItemSwap);
 
             nodes.AddRange(ExtractNodes(componentElement));
 
@@ -882,8 +892,13 @@ namespace Barotrauma.Items.Components
 
         protected override void RemoveComponentSpecific()
         {
+            if (item.Container?.GetComponent<CircuitBox>() is { } circuitBox)
+            {
+                circuitBox.RemoveWire(this);
+            }
             ClearConnections();
             base.RemoveComponentSpecific();
+
 #if CLIENT
             if (DraggingWire == this) { draggingWire = null; }
             overrideSprite?.Remove();

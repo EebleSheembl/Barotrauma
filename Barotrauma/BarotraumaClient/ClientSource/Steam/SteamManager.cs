@@ -41,7 +41,13 @@ namespace Barotrauma.Steam
                     }
                 }
 
-                Steamworks.SteamNetworkingUtils.OnDebugOutput += LogSteamworksNetworking;
+                Steamworks.SteamNetworkingUtils.OnDebugOutput += (Steamworks.NetDebugOutput nType, string pszMsg) =>
+                {
+                    if (GameSettings.CurrentConfig.VerboseLogging)
+                    {
+                        LogSteamworksNetworking(nType, pszMsg);
+                    }
+                };
 
                 // Needed to detect invites for social overlay
                 Steamworks.SteamFriends.ListenForFriendsMessages = true;
@@ -86,6 +92,8 @@ namespace Barotrauma.Steam
                 
                 //Maybe I'm completely wrong! All I know is that we need to handle both!
             }
+            
+            SteamTimelineManager.Initialize();
         }
 
         public static bool NetworkingDebugLog { get; private set; } = false;

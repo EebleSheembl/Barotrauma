@@ -169,12 +169,14 @@ namespace Barotrauma
         /// Purchased upgrades are temporarily stored in <see cref="PendingUpgrades"/> and they are applied
         /// after the next round starts similarly how items are spawned in the stowage room after the round starts.
         /// </remarks>
-        public void PurchaseUpgrade(UpgradePrefab prefab, UpgradeCategory category, bool force = false, Client? client = null)
+        public bool TryPurchaseUpgrade(UpgradePrefab prefab, UpgradeCategory category, bool force = false, Client? client = null)
         {
+            if (!HasPermissionToManageUpgrades(client)) { return false; }
+
             if (!CanUpgradeSub())
             {
                 DebugConsole.ThrowError("Cannot upgrade when switching to another submarine.");
-                return;
+                return false;
             }
 
             int price = prefab.Price.GetBuyPrice(prefab, GetUpgradeLevel(prefab, category), Campaign.Map?.CurrentLocation);
@@ -185,7 +187,7 @@ namespace Barotrauma
             if (currentLevel + 1 > maxLevel)
             {
                 DebugConsole.ThrowError($"Tried to purchase \"{prefab.Name}\" over the max level! ({newLevel} > {maxLevel}). The transaction has been cancelled.");
-                return;
+                return false;
             }
 
             bool TryTakeResources(Character character)
@@ -203,17 +205,17 @@ namespace Barotrauma
                 switch (GameMain.NetworkMember)
                 {
                     case null when Character.Controlled is { } controlled: // singleplayer
-                        if (!TryTakeResources(controlled)) { return; }
+                        if (!TryTakeResources(controlled)) { return false; }
                         break;
                     case { IsClient: true }:
-                        if (!prefab.HasResourcesToUpgrade(Character.Controlled, newLevel)) { return; }
+                        if (!prefab.HasResourcesToUpgrade(Character.Controlled, newLevel)) { return false; }
                         break;
                     case { IsServer: true } when client?.Character is { } character:
-                        if (!TryTakeResources(character)) { return; }
+                        if (!TryTakeResources(character)) { return false; }
                         break;
                     default:
                         DebugConsole.ThrowError($"Tried to purchase \"{prefab.Name}\" without a player.");
-                        return;
+                        return false;
                 }
             }
 
@@ -270,11 +272,15 @@ namespace Barotrauma
                 PurchasedUpgrades.Add(new PurchasedUpgrade(prefab, category));
 #endif
                 OnUpgradesChanged?.Invoke(this);
+
+                return true;
             }
             else
             {
                 DebugConsole.ThrowError("Tried to purchase an upgrade with insufficient funds, the transaction has not been completed.\n" +
                                         $"Upgrade: {prefab.Name}, Cost: {price}, Have: {Campaign.GetWallet(client).Balance}");
+
+                return false;
             }
         }
 
@@ -295,8 +301,10 @@ namespace Barotrauma
         /// <summary>
         /// Purchases an item swap and handles logic for deducting the credit.
         /// </summary>
-        public void PurchaseItemSwap(Item itemToRemove, ItemPrefab itemToInstall, bool force = false, Client? client = null)
+        public void PurchaseItemSwap(Item itemToRemove, ItemPrefab itemToInstall, bool isNetworkMessage = false, Client? client = null)
         {
+            if (!HasPermissionToManageUpgrades(client)) { return; }
+
             if (!CanUpgradeSub())
             {
                 DebugConsole.ThrowError("Cannot swap items when switching to another submarine.");
@@ -343,12 +351,14 @@ namespace Barotrauma
                 price = itemToInstall.SwappableItem.GetPrice(Campaign.Map?.CurrentLocation) * linkedItems.Count;
             }
 
-            if (force)
+            if (isNetworkMessage)
             {
                 price = 0;
             }
 
-            if (Campaign.TryPurchase(client, price))
+            //do not try to purchase if this is a network message (if the server is telling us that an item swap was purchased)
+            //we want to do the purchase no matter what, and the server handles deducting the money
+            if (isNetworkMessage || Campaign.TryPurchase(client, price))
             {
                 PurchasedItemSwaps.RemoveAll(p => linkedItems.Contains(p.ItemToRemove));
                 if (GameMain.NetworkMember == null || GameMain.NetworkMember.IsServer)
@@ -396,8 +406,10 @@ namespace Barotrauma
         /// <summary>
         /// Cancels the currently pending item swap, or uninstalls the item if there's no swap pending
         /// </summary>
-        public void CancelItemSwap(Item itemToRemove, bool force = false)
+        public void CancelItemSwap(Item itemToRemove, bool force = false, Client? client = null)
         {
+            if (!HasPermissionToManageUpgrades(client)) { return; }
+
             if (!CanUpgradeSub())
             {
                 DebugConsole.ThrowError("Cannot swap items when switching to another submarine.");
@@ -433,8 +445,7 @@ namespace Barotrauma
             {
                 if (itemToCancel.PendingItemSwap == null)
                 {
-                    var replacement = MapEntityPrefab.Find("", swappableItem.ReplacementOnUninstall) as ItemPrefab;
-                    if (replacement == null)
+                    if (MapEntityPrefab.FindByIdentifier(swappableItem.ReplacementOnUninstall) is not ItemPrefab replacement)
                     {
                         DebugConsole.ThrowError($"Failed to uninstall item \"{itemToCancel.Name}\". Could not find the replacement item \"{swappableItem.ReplacementOnUninstall}\".");
                         return;
@@ -756,6 +767,18 @@ namespace Barotrauma
                 Campaign.PendingSubmarineSwitch.Name == Submarine.MainSub.Info.Name;
         }
 
+        public bool HasPermissionToManageUpgrades(Client? client = null)
+        {
+            if (!GameMain.IsMultiplayer) { return true; }
+
+#if SERVER
+            if (client is null) { return false; }
+            return CampaignMode.AllowedToManageCampaign(client, ClientPermissions.ManageCampaign);
+#elif CLIENT
+            return CampaignMode.AllowedToManageCampaign(ClientPermissions.ManageCampaign);
+#endif
+        }
+
         public void Save(XElement? parent)
         {
             if (parent == null) { return; }
@@ -786,11 +809,10 @@ namespace Barotrauma
 
         private void LoadPendingUpgrades(XElement? element, bool isSingleplayer = true)
         {
-            if (!(element is { HasElements: true })) { return; }
+            if (element is not { HasElements: true }) { return; }
 
             List<PurchasedUpgrade> pendingUpgrades = new List<PurchasedUpgrade>();
-
-            // ReSharper disable once LoopCanBeConvertedToQuery
+            
             foreach (XElement upgrade in element.Elements())
             {
                 Identifier categoryIdentifier = upgrade.GetAttributeIdentifier("category", Identifier.Empty);

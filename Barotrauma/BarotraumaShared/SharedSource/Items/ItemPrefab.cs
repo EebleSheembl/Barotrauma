@@ -5,6 +5,7 @@ using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Xml.Linq;
@@ -63,9 +64,12 @@ namespace Barotrauma
             OutConditionMax = element.GetAttributeFloat("outconditionmax", element.GetAttributeFloat("outcondition", 1.0f));
             CopyCondition = element.GetAttributeBool("copycondition", false);
             Commonness = element.GetAttributeFloat("commonness", 1.0f);
+
+            Identifier[] defaultRequiredDeconstructor = new Identifier[] { "deconstructor".ToIdentifier() };
             RequiredDeconstructor = element.GetAttributeIdentifierArray("requireddeconstructor", 
-                element.Parent?.GetAttributeIdentifierArray("requireddeconstructor", Array.Empty<Identifier>()) ?? Array.Empty<Identifier>());
+                element.Parent?.GetAttributeIdentifierArray("requireddeconstructor", null) ?? defaultRequiredDeconstructor);
             RequiredOtherItem = element.GetAttributeIdentifierArray("requiredotheritem", Array.Empty<Identifier>());
+
             ActivateButtonText = element.GetAttributeString("activatebuttontext", string.Empty);
             InfoText = element.GetAttributeString("infotext", string.Empty);
             InfoTextOnOtherItemMissing = element.GetAttributeString("infotextonotheritemmissing", string.Empty);
@@ -129,10 +133,30 @@ namespace Barotrauma
         {
             public readonly Identifier ItemPrefabIdentifier;
 
-            public ItemPrefab ItemPrefab => 
-                ItemPrefab.Prefabs.TryGet(ItemPrefabIdentifier, out var prefab) ? prefab
-                : MapEntityPrefab.FindByName(ItemPrefabIdentifier.Value) as ItemPrefab;
-            
+            [MaybeNull, AllowNull]
+            public ItemPrefab cachedItemPrefab;
+
+            [MaybeNull, AllowNull]
+            private Md5Hash prevContentPackagesHash;
+
+            [MaybeNull]
+            public ItemPrefab ItemPrefab
+            {
+                get
+                {
+                    if (prevContentPackagesHash == null ||
+                        !prevContentPackagesHash.Equals(ContentPackageManager.EnabledPackages.MergedHash))
+                    {
+                        cachedItemPrefab = ItemPrefab.Prefabs.TryGet(ItemPrefabIdentifier, out var prefab)
+                                               ? prefab
+                                               : MapEntityPrefab.FindByName(ItemPrefabIdentifier.Value) as ItemPrefab;
+                        prevContentPackagesHash = ContentPackageManager.EnabledPackages.MergedHash;
+                    }
+
+                    return cachedItemPrefab;
+                }
+            }
+
             public override UInt32 UintIdentifier { get; }
 
             public override IEnumerable<ItemPrefab> ItemPrefabs => ItemPrefab == null ? Enumerable.Empty<ItemPrefab>() : ItemPrefab.ToEnumerable();
@@ -142,7 +166,7 @@ namespace Barotrauma
 
             public override bool MatchesItem(Item item)
             {
-                return item?.Prefab.Identifier == ItemPrefabIdentifier;
+                return item?.Prefab.Identifier == (ItemPrefab?.Identifier ?? ItemPrefabIdentifier);
             }
 
             public RequiredItemByIdentifier(Identifier itemPrefab, int amount, float minCondition, float maxCondition, bool useCondition, LocalizedString overrideDescription, LocalizedString overrideHeader) :
@@ -197,7 +221,8 @@ namespace Barotrauma
             {
                 Tag = tag;
                 using MD5 md5 = MD5.Create();
-                UintIdentifier = ToolBoxCore.IdentifierToUint32Hash(tag, md5);
+                //add "tag:" to the hash, so we don't get a hash collision between recipes configured as identifier="smth" and tag="smth"
+                UintIdentifier = ToolBoxCore.IdentifierToUint32Hash(("tag:" + tag).ToIdentifier(), md5);
             }
 
             public override string ToString()
@@ -216,13 +241,15 @@ namespace Barotrauma
         public readonly ImmutableArray<Identifier> SuitableFabricatorIdentifiers;
         public readonly float RequiredTime;
         public readonly int RequiredMoney;
-        public readonly bool RequiresRecipe;
+        public readonly bool RequiresRecipe; 
+        public readonly bool HideIfNoRecipe;
         public readonly float OutCondition; //Percentage-based from 0 to 1
         public readonly ImmutableArray<Skill> RequiredSkills;
         public readonly uint RecipeHash;
         public readonly int Amount;
         public readonly int? Quality;
         public readonly bool HideForNonTraitors;
+        public readonly InvSlotType MoveToSlot;
 
         /// <summary>
         /// How many of this item the fabricator can create (< 0 = unlimited)
@@ -250,6 +277,7 @@ namespace Barotrauma
             }
             var requiredItems = new List<RequiredItem>();
             RequiresRecipe = element.GetAttributeBool("requiresrecipe", false);
+            HideIfNoRecipe = element.GetAttributeBool("hideifnorecipe", false);
             Amount = element.GetAttributeInt("amount", 1);
 
             int limitDefault = element.GetAttributeInt("fabricationlimit", -1);
@@ -257,6 +285,7 @@ namespace Barotrauma
             FabricationLimitMax = element.GetAttributeInt(nameof(FabricationLimitMax), limitDefault);
 
             HideForNonTraitors = element.GetAttributeBool(nameof(HideForNonTraitors), false);
+            MoveToSlot = element.GetAttributeEnum(nameof(MoveToSlot), InvSlotType.None);
 
             if (element.GetAttribute(nameof(Quality)) != null)
             {
@@ -340,8 +369,12 @@ namespace Barotrauma
                 }
             }
 
-            this.RequiredSkills = requiredSkills.ToImmutableArray();
-            this.RequiredItems = requiredItems.ToImmutableArray();
+            RequiredSkills = requiredSkills.ToImmutableArray();
+            RequiredItems = requiredItems
+                /*Put the items required by identifier first - since we must use specific items for those, we should check them before the ones that accept multiple items. 
+                 Otherwise we might end up choosing the "specific item" as the multi-option ingredient, and not have enough left for the "specific item" requirement */
+                .OrderBy(requiredItem => requiredItem is RequiredItemByIdentifier ? 0 : 1)
+                .ToImmutableArray();
 
             RecipeHash = GenerateHash();
         }
@@ -378,6 +411,7 @@ namespace Barotrauma
         public readonly int Amount;
         public readonly bool CampaignOnly;
         public readonly bool NotCampaign;
+        public readonly bool NotPvP;
         public readonly bool TransferOnlyOnePerContainer;
         public readonly bool AllowTransfersHere = true;
 
@@ -395,6 +429,7 @@ namespace Barotrauma
             MinCondition = element.GetAttributeFloat("mincondition", 0f);
             CampaignOnly = element.GetAttributeBool("campaignonly", CampaignOnly);
             NotCampaign = element.GetAttributeBool("notcampaign", NotCampaign);
+            NotPvP = element.GetAttributeBool("notpvp", NotPvP);
             TransferOnlyOnePerContainer = element.GetAttributeBool("TransferOnlyOnePerContainer", TransferOnlyOnePerContainer);
             AllowTransfersHere = element.GetAttributeBool("AllowTransfersHere", AllowTransfersHere);
 
@@ -438,8 +473,12 @@ namespace Barotrauma
 
         public int GetPrice(Location location = null)
         {
-            int price = BasePrice;
-            return location?.GetAdjustedMechanicalCost(price) ?? price;
+            int price = location?.GetAdjustedMechanicalCost(BasePrice) ?? BasePrice;
+            if (GameMain.GameSession?.Campaign is CampaignMode campaign)
+            {
+                price = (int)(price * campaign.Settings.ShipyardPriceMultiplier);
+            }
+            return price;
         }
 
         public SwappableItem(ContentXElement element)
@@ -500,7 +539,7 @@ namespace Barotrauma
         /// </summary>
         public bool IsOverride => Prefabs.IsOverride(this);
 
-        private readonly XElement originalElement;
+        private readonly ContentXElement originalElement;
         public ContentXElement ConfigElement { get; private set; }
 
         public ImmutableArray<DeconstructItem> DeconstructItems { get; private set; }
@@ -693,6 +732,9 @@ namespace Barotrauma
         [Serialize(false, IsPropertySaveable.No, description: "Hides the condition displayed in the item's tooltip.")]
         public bool HideConditionInTooltip { get; set; }
 
+        [Serialize("", IsPropertySaveable.No, description: "If set, displays if the given fabrication recipe has been unlocked or not in the tooltip. The actual unlocking of the recipe should be handled in a status effect.")]
+        public Identifier UnlockedRecipeInToolTip { get; set; }
+
         //if true and the item has trigger areas defined, characters need to be within the trigger to interact with the item
         //if false, trigger areas define areas that can be used to highlight the item
         [Serialize(true, IsPropertySaveable.No)]
@@ -721,6 +763,9 @@ namespace Barotrauma
         [Serialize(false, IsPropertySaveable.No, description: "Should the character who's selected the item grab it (hold their hand on it, the same way as they do when repairing)? Defaults to true on items that have an ItemContainer component.")]
         public bool GrabWhenSelected { get; set; }
 
+        [Serialize(true, IsPropertySaveable.No, description: "Are AI characters allowed to deselect the item when they're idling (and wander off?).")]
+        public bool AllowDeselectWhenIdling { get; private set; }
+
         private float health;
 
         [Serialize(100.0f, IsPropertySaveable.No)]
@@ -747,6 +792,9 @@ namespace Barotrauma
         [Serialize(false, IsPropertySaveable.No)]
         public bool DamagedByExplosions { get; private set; }
 
+        [Serialize(false, IsPropertySaveable.No)]
+        public bool DamagedByContainedItemExplosions { get; private set; }
+
         [Serialize(1f, IsPropertySaveable.No)]
         public float ExplosionDamageMultiplier { get; private set; }
 
@@ -772,6 +820,15 @@ namespace Barotrauma
             get { return impactTolerance; }
             set { impactTolerance = Math.Max(value, 0.0f); }
         }
+
+        [Serialize(0.0f, IsPropertySaveable.No, description: "The amount of damage the item takes from impacts. Acts as a multiplier on the strength of the impact. Note that ImpactTolerance must be set for impacts to register.")]
+        public float ImpactDamage { get; set; }
+
+        [Serialize(1.0f, IsPropertySaveable.No, description: "Probability for impacts to register. Defaults to 1. Note that ImpactTolerance must also be set for impacts to register.")]
+        public float ImpactDamageProbability { get; set; }
+
+        [Serialize(false, IsPropertySaveable.No, "If true, submarine impacts will trigger OnImpact effects. Only applies to items with a null or non-dynamic physics body - items with dynamic bodies always react to impacts.")]
+        public bool ReceiveSubmarineImpacts { get; set; }
 
         [Serialize(0.0f, IsPropertySaveable.No)]
         public float OnDamagedThreshold { get; set; }
@@ -840,7 +897,7 @@ namespace Barotrauma
         [Serialize(10.0f, IsPropertySaveable.No)]
         public float MaxScale { get; private set; }
 
-        [Serialize(false, IsPropertySaveable.No)]
+        [Serialize(false, IsPropertySaveable.No, description: "Bots avoid rooms with dangerous items in them.")]
         public bool IsDangerous { get; private set; }
 
         private int maxStackSize;
@@ -874,7 +931,8 @@ namespace Barotrauma
             int extraStackSize = inventory switch
             {
                 ItemInventory { Owner: Item it } i => (int)it.StatManager.GetAdjustedValueAdditive(ItemTalentStats.ExtraStackSize, i.ExtraStackSize),
-                CharacterInventory { Owner: Character { Info: { } info } } i => i.ExtraStackSize + (int)info.GetSavedStatValueWithAll(StatTypes.InventoryExtraStackSize, Category.ToIdentifier()),
+                CharacterInventory { Owner: Character { Info: { } info } } i => 
+                    i.ExtraStackSize + EnumExtensions.GetIndividualFlags(Category).Sum(c => (int)info.GetSavedStatValueWithAll(StatTypes.InventoryExtraStackSize, c.ToIdentifier())),
                 not null => inventory.ExtraStackSize,
                 null => 0
             };
@@ -983,7 +1041,7 @@ namespace Barotrauma
             ParseConfigElement(variantOf: null);
         }
 
-        private string GetTexturePath(ContentXElement subElement, ItemPrefab variantOf)
+        public string GetTexturePath(ContentXElement subElement, ItemPrefab variantOf)
             => subElement.DoesAttributeReferenceFileNameAlone("texture")
                 ? Path.GetDirectoryName(variantOf?.ContentFile.Path ?? ContentFile.Path)
                 : "";
@@ -1036,11 +1094,13 @@ namespace Barotrauma
                 AllowAsExtraCargo = ConfigElement.GetAttributeBool("allowasextracargo", false);
             }
 
-            this.tags = ConfigElement.GetAttributeIdentifierArray("tags", Array.Empty<Identifier>()).ToImmutableHashSet();
-            if (!Tags.Any())
+            List<Identifier> tags = ConfigElement.GetAttributeIdentifierArray("tags", Array.Empty<Identifier>()).ToList();
+            //this was previously handled in ItemComponent, moved here to make it part of the immutable tags of the item
+            if (ConfigElement.Descendants().Any(e => e.NameAsIdentifier() == "lightcomponent")) 
             {
-                this.tags = ConfigElement.GetAttributeIdentifierArray("Tags", Array.Empty<Identifier>()).ToImmutableHashSet();
+                tags.Add("light".ToIdentifier());
             }
+            this.tags = tags.ToImmutableHashSet();
 
             if (ConfigElement.GetAttribute("cargocontainername") != null)
             {
@@ -1258,6 +1318,11 @@ namespace Barotrauma
             this.LevelCommonness = levelCommonness.ToImmutableDictionary();
             this.LevelQuantity = levelQuantity.ToImmutableDictionary();
 
+            //flipping holdable items vertically is not properly supported (uses the orientation of the physics body, which depends on which direction the character holding the item is facing)
+            //so let's by default make the item non-flippable, but if there's some use case where the item needs to flip vertically, it can be enabled by explicitly defining it in the XML.
+            bool canFlipYByDefault = ConfigElement.GetChildElement(nameof(Holdable)) == null;
+            CanFlipY = ConfigElement.GetAttributeBool(nameof(CanFlipY), def: canFlipYByDefault);
+
             // Backwards compatibility
             if (storePrices.Any())
             {
@@ -1382,10 +1447,14 @@ namespace Barotrauma
         public bool CanBeBoughtFrom(Location.StoreInfo store, out PriceInfo priceInfo)
         {
             priceInfo = GetPriceInfo(store);
+            Identifier? faction = store?.Location.Faction?.Prefab.Identifier;
+            Identifier? secondaryFaction = store?.Location.SecondaryFaction?.Prefab.Identifier;
+
             return
                 priceInfo is { CanBeBought: true } &&
                 (store?.Location.LevelData?.Difficulty ?? 0) >= priceInfo.MinLevelDifficulty &&
-                (!priceInfo.MinReputation.Any() || priceInfo.MinReputation.Any(p => store?.Location.Faction?.Prefab.Identifier == p.Key || store?.Location.SecondaryFaction?.Prefab.Identifier == p.Key));
+                (priceInfo.RequiredFaction.IsEmpty || faction == priceInfo.RequiredFaction || secondaryFaction == priceInfo.RequiredFaction) &&
+                (!priceInfo.MinReputation.Any() || priceInfo.MinReputation.Any(p => faction == p.Key || secondaryFaction == p.Key));
         }
 
         public bool CanBeBoughtFrom(Location location)
@@ -1566,7 +1635,7 @@ namespace Barotrauma
 
         public void InheritFrom(ItemPrefab parent)
         {
-            ConfigElement = originalElement.CreateVariantXML(parent.ConfigElement, CheckXML).FromPackage(ConfigElement.ContentPackage);
+            ConfigElement = originalElement.CreateVariantXML(parent.ConfigElement, CheckXML);
             ParseConfigElement(parent);
 
             void CheckXML(XElement originalElement, XElement variantElement, XElement result)

@@ -1,8 +1,6 @@
-﻿using System;
-using OpenAL;
+﻿using Barotrauma.IO;
 using Microsoft.Xna.Framework;
-using Barotrauma.IO;
-using System.Xml.Linq;
+using System;
 
 namespace Barotrauma.Sounds
 {
@@ -23,6 +21,11 @@ namespace Barotrauma.Sounds
         public readonly bool Stream;
 
         public readonly bool StreamsReliably;
+
+        /// <summary>
+        /// Length of the audio in seconds. Null if the length is unknown (e.g. a streaming audio source).
+        /// </summary>
+        public abstract double? DurationSeconds { get; }
 
         public bool Loading { get; protected set; }
 
@@ -61,6 +64,8 @@ namespace Barotrauma.Sounds
         public float BaseGain;
         public float BaseNear;
         public float BaseFar;
+
+        public bool MuteBackgroundMusic;
 
         public Sound(SoundManager owner, string filename, bool stream, bool streamsReliably, ContentXElement xElement = null, bool getFullPath = true)
         {
@@ -102,19 +107,22 @@ namespace Barotrauma.Sounds
         public virtual SoundChannel Play(float gain, float range, Vector2 position, bool muffle = false)
         {
             LogWarningIfStillLoading();
-            return new SoundChannel(this, gain, new Vector3(position.X, position.Y, 0.0f), 1.0f, range * 0.4f, range, "default", muffle);
+            if (Owner.CountPlayingInstances(this) >= MaxSimultaneousInstances) { return null; }
+            return new SoundChannel(this, gain, new Vector3(position.X, position.Y, 0.0f), 1.0f, range * 0.4f, range, SoundManager.SoundCategoryDefault, muffle);
         }
 
         public virtual SoundChannel Play(float gain, float range, float freqMult, Vector2 position, bool muffle = false)
         {
             LogWarningIfStillLoading();
-            return new SoundChannel(this, gain, new Vector3(position.X, position.Y, 0.0f), freqMult, range * 0.4f, range, "default", muffle);
+            if (Owner.CountPlayingInstances(this) >= MaxSimultaneousInstances) { return null; }
+            return new SoundChannel(this, gain, new Vector3(position.X, position.Y, 0.0f), freqMult, range * 0.4f, range, SoundManager.SoundCategoryDefault, muffle);
         }
 
         public virtual SoundChannel Play(Vector3? position, float gain, float freqMult = 1.0f, bool muffle = false)
         {
             LogWarningIfStillLoading();
-            return new SoundChannel(this, gain, position, freqMult, BaseNear, BaseFar, "default", muffle);
+            if (Owner.CountPlayingInstances(this) >= MaxSimultaneousInstances) { return null; }
+            return new SoundChannel(this, gain, position, freqMult, BaseNear, BaseFar, SoundManager.SoundCategoryDefault, muffle);
         }
 
         public virtual SoundChannel Play(float gain)
@@ -127,7 +135,7 @@ namespace Barotrauma.Sounds
             return Play(BaseGain);
         }
 
-        public virtual SoundChannel Play(float? gain, string category)
+        public virtual SoundChannel Play(float? gain, Identifier category)
         {
             if (Owner.CountPlayingInstances(this) >= MaxSimultaneousInstances) { return null; }
             return new SoundChannel(this, gain ?? BaseGain, null, 1.0f, BaseNear, BaseFar, category);
@@ -137,20 +145,8 @@ namespace Barotrauma.Sounds
         {
             for (int i = 0; i < length; i++)
             {
-                outBuffer[i] = FloatToShort(inBuffer[i]);
+                outBuffer[i] = ToolBox.FloatToShortAudioSample(inBuffer[i]);
             }
-        }
-
-        static protected short FloatToShort(float fVal)
-        {
-            int temp = (int)(32767 * fVal);
-            if (temp > short.MaxValue) temp = short.MaxValue;
-            else if (temp < short.MinValue) temp = short.MinValue;
-            return (short)temp;
-        }
-        static protected float ShortToFloat(short shortVal)
-        {
-            return shortVal / 32767f;
         }
 
         public abstract int FillStreamBuffer(int samplePos, short[] buffer);

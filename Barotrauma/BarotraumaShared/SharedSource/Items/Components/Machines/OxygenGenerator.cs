@@ -46,7 +46,7 @@ namespace Barotrauma.Items.Components
 
             if (item.CurrentHull == null) { return; }
             
-            if (Voltage < MinVoltage && PowerConsumption > 0)
+            if (!HasPower && PowerConsumption > 0)
             {
                 return;
             }
@@ -84,7 +84,10 @@ namespace Barotrauma.Items.Components
             CurrFlow = 0.0f;
         }
 
-        private void GetVents()
+        /// <summary>
+        /// Finds all the linked vents and calculates how much oxygen should be distributed to each of them based on the hull volumes.
+        /// </summary>
+        public void GetVents()
         {
             totalHullVolume = 0.0f;
             ventList ??= new List<(Vent vent, float hullVolume)>();

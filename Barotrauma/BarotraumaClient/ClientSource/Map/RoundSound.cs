@@ -16,6 +16,10 @@ namespace Barotrauma
         public readonly bool Stream;
         public readonly bool IgnoreMuffling;
 
+        public int LastStreamSeekPos;
+
+        public readonly bool MuteBackgroundMusic;
+
         public readonly string? Filename;
 
         private RoundSound(ContentXElement element, Sound sound)
@@ -26,6 +30,16 @@ namespace Barotrauma
             Range = element.GetAttributeFloat("range", 1000.0f);
             Volume = element.GetAttributeFloat("volume", 1.0f);
             IgnoreMuffling = element.GetAttributeBool("dontmuffle", false);
+            MuteBackgroundMusic = element.GetAttributeBool("MuteBackgroundMusic", false);
+
+            if (!Stream && Sound.DurationSeconds > 60.0f)
+            {
+                DebugConsole.AddWarning(
+                    $"Potential issue in content package: a large audio clip \"{System.IO.Path.GetFileName(Filename)}\" is set to be loaded into memory instead of streaming it from the disk. "+
+                    "This can lead to excessive memory usage. Large clips should generally be streamed, while small and frequently played sounds should be loaded to memory to avoid the IO overhead of streaming. "+
+                    "Consider adding stream=\"true\" to the sound's XML element.",
+                contentPackage: element.ContentPackage);
+            }
             
             FrequencyMultiplierRange = new Vector2(1.0f);
             string freqMultAttr = element.GetAttributeString("frequencymultiplier", element.GetAttributeString("frequency", "1.0"));
@@ -58,10 +72,11 @@ namespace Barotrauma
         
         private static readonly List<RoundSound> roundSounds = new List<RoundSound>();
         private static readonly Dictionary<string, RoundSound> roundSoundByPath = new Dictionary<string, RoundSound>();
-        public static RoundSound? Load(ContentXElement element, bool stream = false)
+        public static RoundSound? Load(ContentXElement element)
         {
             if (GameMain.SoundManager?.Disabled ?? true) { return null; }
 
+            bool stream = element.GetAttributeBool(nameof(Stream), false);
             var filename = element.GetAttributeContentPath("file") ?? element.GetAttributeContentPath("sound");
             if (filename is null)
             {
@@ -73,9 +88,16 @@ namespace Barotrauma
             }
 
             Sound? existingSound = null;
-            if (roundSoundByPath.TryGetValue(filename.FullPath, out RoundSound? rs) && rs.Sound is { Disposed: false })
+            if (roundSoundByPath.TryGetValue(filename.FullPath, out RoundSound? rs))
             {
-                existingSound = rs.Sound;
+                if (rs.Sound is { Disposed: false })
+                {
+                    existingSound = rs.Sound;
+                }
+                else
+                {
+                    roundSoundByPath.Remove(filename.FullPath);
+                }
             }
 
             if (existingSound is null)

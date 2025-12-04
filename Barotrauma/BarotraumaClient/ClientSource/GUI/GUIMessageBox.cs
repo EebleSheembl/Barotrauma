@@ -9,7 +9,6 @@ namespace Barotrauma
 {
     public class GUIMessageBox : GUIFrame
     {
-        #warning TODO: change this to List<GUIMessageBox> and fix incorrect uses of this list
         public readonly static List<GUIComponent> MessageBoxes = new List<GUIComponent>();
         private static int DefaultWidth
         {
@@ -290,7 +289,7 @@ namespace Barotrauma
                     GUIStyle.Apply(Text, "", this);
                     Content.Recalculate();
                     Text.RectTransform.NonScaledSize = Text.RectTransform.MinSize = Text.RectTransform.MaxSize =
-                        new Point(Text.Rect.Width, Text.Rect.Height);
+                        new Point(Text.Rect.Width, Math.Min(Text.Rect.Height, GameMain.GraphicsHeight));
                     Text.RectTransform.IsFixedSize = true;
                     if (headerText.IsNullOrWhiteSpace())
                     {

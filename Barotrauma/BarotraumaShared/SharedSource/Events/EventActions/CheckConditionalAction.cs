@@ -1,4 +1,4 @@
-using Barotrauma.Extensions;
+﻿using Barotrauma.Extensions;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -25,12 +25,15 @@ namespace Barotrauma
 
         [Serialize("", IsPropertySaveable.Yes, description: "A tag to apply to the hull the target is currently in when the check succeeds.")]
         public Identifier ApplyTagToHull { get; set; }
+        
+        [Serialize("", IsPropertySaveable.Yes, description: "Tag to apply to the target (or all targets if there's multiple) when the check succeeds.")]
+        public Identifier ApplyTagToTarget { get; set; }
 
         public CheckConditionalAction(ScriptedEvent parentEvent, ContentXElement element) : base(parentEvent, element)
         {
             if (TargetTag.IsEmpty)
             {
-                DebugConsole.LogError($"CheckConditionalAction error: {GetEventName()} uses a CheckConditionalAction with no target tag! This will cause the check to automatically succeed.",
+                DebugConsole.LogError($"CheckConditionalAction error: {GetEventDebugName()} uses a CheckConditionalAction with no target tag! This will cause the check to automatically succeed.",
                     contentPackage: parentEvent.Prefab.ContentPackage);
             }
             var conditionalElements = element.GetChildElements("Conditional");
@@ -45,14 +48,13 @@ namespace Barotrauma
                 foreach (ContentXElement subElement in conditionalElements)
                 {
                     conditionalList.AddRange(PropertyConditional.FromXElement(subElement));
-                    break;
                 }
                 Conditionals = conditionalList.ToImmutableArray();
             }
 
             if (Conditionals.None())
             {
-                DebugConsole.LogError($"CheckConditionalAction error: {GetEventName()} uses a CheckConditionalAction with no valid PropertyConditional! This will cause the check to automatically succeed.",
+                DebugConsole.LogError($"CheckConditionalAction error: {GetEventDebugName()} uses a CheckConditionalAction with no valid PropertyConditional! This will cause the check to automatically succeed.",
                     contentPackage: parentEvent.Prefab.ContentPackage);
             }
 
@@ -67,11 +69,6 @@ namespace Barotrauma
             }
         }
 
-        private string GetEventName()
-        {
-            return ParentEvent?.Prefab?.Identifier is { IsEmpty: false } identifier ? $"the event \"{identifier}\"" : "an unknown event";
-        }
-
         protected override bool? DetermineSuccess()
         {
             IEnumerable<ISerializableEntity> targets = null;
@@ -82,7 +79,7 @@ namespace Barotrauma
 
             if (targets.None())
             {
-                DebugConsole.LogError($"{nameof(CheckConditionalAction)} error: {GetEventName()} uses a {nameof(CheckConditionalAction)} but no valid target was found for tag \"{TargetTag}\"! This will cause the check to automatically succeed.",
+                DebugConsole.LogError($"{nameof(CheckConditionalAction)} error: {GetEventDebugName()} uses a {nameof(CheckConditionalAction)} but no valid target was found for tag \"{TargetTag}\"! This will cause the check to automatically succeed.",
                     contentPackage: ParentEvent.Prefab.ContentPackage);
             }
 
@@ -90,7 +87,7 @@ namespace Barotrauma
             {
                 foreach (var target in targets)
                 {
-                    ApplyTagsToHulls(target as Entity, ApplyTagToHull, ApplyTagToLinkedHulls);
+                    ApplyTagsToTarget(target);
                 }
                 return true;
             }
@@ -101,11 +98,20 @@ namespace Barotrauma
                 {
                     if (ConditionalsMatch(target))
                     {
+                        ApplyTagsToTarget(target);
                         success = true;
-                        ApplyTagsToHulls(target as Entity, ApplyTagToHull, ApplyTagToLinkedHulls);
                     }
                 }
                 return success;
+            }
+
+            void ApplyTagsToTarget(ISerializableEntity target)
+            {
+                if (!ApplyTagToTarget.IsEmpty)
+                {
+                    ParentEvent.AddTarget(ApplyTagToTarget, target as Entity);
+                }
+                ApplyTagsToHulls(target as Entity, ApplyTagToHull, ApplyTagToLinkedHulls);
             }
         }
 

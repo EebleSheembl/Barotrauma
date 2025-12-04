@@ -18,7 +18,14 @@ namespace Barotrauma.Items.Components
         public readonly int MaxWires = 5;
 
         public readonly string Name;
-        public readonly LocalizedString DisplayName;
+        private readonly LocalizedString _displayName;
+        public LocalizedString DisplayName
+        {
+            get => DisplayNameOverride ?? _displayName;
+            private init => _displayName = value;
+        }
+
+        public LocalizedString DisplayNameOverride;
 
         private readonly HashSet<Wire> wires;
         public IReadOnlyCollection<Wire> Wires => wires;
@@ -155,13 +162,12 @@ namespace Barotrauma.Items.Components
             if (DisplayName.IsNullOrEmpty())
             {
 #if DEBUG
-                DebugConsole.ThrowError("Missing display name in connection " + item.Name + ": " + Name);
+                DebugConsole.ThrowError($"Could not find a display name for the connection {Name} in the item {item.Name} (submarine: {item.Submarine?.Info?.Name ?? "none"})");
 #endif
                 DisplayName = Name;
             }
 
-            IsPower = Name == "power_in" || Name == "power" || Name == "power_out";
-
+            IsPower = element.GetAttributeBool("ispower", Name is "power_in" or "power" or "power_out");
 
             LoadedWires = new List<(ushort wireId, int? connectionIndex)>();
             foreach (var subElement in element.Elements())

@@ -92,10 +92,10 @@ namespace Barotrauma.Items.Components
                 switch (subElement.Name.ToString().ToLowerInvariant())
                 {
                     case "temperatureboostsoundup":
-                        temperatureBoostSoundUp = RoundSound.Load(subElement, false);
+                        temperatureBoostSoundUp = RoundSound.Load(subElement);
                         break;
                     case "temperatureboostsounddown":
-                        temperatureBoostSoundDown = RoundSound.Load(subElement, false);
+                        temperatureBoostSoundDown = RoundSound.Load(subElement);
                         break;
                 }
             }
@@ -475,11 +475,8 @@ namespace Barotrauma.Items.Components
                 if (sound != null)
                 {
                     SoundPlayer.PlaySound(
-                        sound.Sound,
+                        sound,
                         item.WorldPosition,
-                        sound.Volume,
-                        sound.Range,
-                        freqMult: sound.GetRandomFrequencyMultiplier(),
                         hullGuess: item.CurrentHull);
                 }
             }

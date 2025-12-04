@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using Barotrauma.Extensions;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 
 namespace Barotrauma
 {
@@ -20,6 +21,8 @@ namespace Barotrauma
         private readonly float maxDifficulty;
         public float ActualMaxDifficulty => maxDifficulty;
         public float AdjustedMaxDifficulty => maxDifficulty - 0.1f;
+
+        public readonly float ExperienceFromMissionRewards;
 
 
         public readonly ImmutableHashSet<int> AllowedZones;
@@ -50,6 +53,10 @@ namespace Barotrauma
             AllowedZones = element.GetAttributeIntArray("AllowedZones", new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }).ToImmutableHashSet();
             MinDifficulty = element.GetAttributeFloat("MinDifficulty", 0);
             maxDifficulty = element.GetAttributeFloat("MaxDifficulty", 100);
+            float baseExperience = 0.09f;
+            float difficultyRewardMultiplier = 0.25f;
+            float calculateDefaultExperience = baseExperience + MinDifficulty * difficultyRewardMultiplier / 100;
+            ExperienceFromMissionRewards = element.GetAttributeFloat("ExperienceFromMissionRewards", calculateDefaultExperience);
 
             var submarineAvailabilityOverrides = new HashSet<SubmarineAvailability>();
             if (element.GetChildElement("submarines") is ContentXElement availabilityElement)

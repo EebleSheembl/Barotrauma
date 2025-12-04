@@ -570,11 +570,11 @@ namespace Barotrauma.MapCreatures.Behavior
 
             if (HasBrokenThrough)
             {
-                // I wasn't 100% sure what the performance impact on this so I decide to limit it to only check every 5 seconds
+                // I wasn't 100% sure what the performance impact on this so I decide to limit it to only check every 10 seconds
                 if (fireCheckCooldown <= 0)
                 {
                     UpdateFireSources();
-                    fireCheckCooldown = 5f;
+                    fireCheckCooldown = 10f;
                 }
                 else
                 {
@@ -623,7 +623,8 @@ namespace Barotrauma.MapCreatures.Behavior
                         List<BallastFloraBranch> list = branches[hull];
                         if (!list.Any(HasAcidEmitter))
                         {
-                            BallastFloraBranch randomBranch = branches[hull].GetRandomUnsynced();
+                            BallastFloraBranch? randomBranch = branches[hull].GetRandomUnsynced();
+                            if (randomBranch == null) { continue; }
                             randomBranch.SpawningItem = true;
                     
                             ItemPrefab prefab = ItemPrefab.Find(null, AttackItemPrefab);

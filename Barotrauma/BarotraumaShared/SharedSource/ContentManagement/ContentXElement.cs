@@ -76,10 +76,12 @@ namespace Barotrauma
         public string GetAttributeStringUnrestricted(string key, string def) => Element.GetAttributeStringUnrestricted(key, def);
         public string[]? GetAttributeStringArray(string key, string[]? def, bool convertToLowerInvariant = false) => Element.GetAttributeStringArray(key, def, convertToLowerInvariant);
         public ContentPath? GetAttributeContentPath(string key) => Element.GetAttributeContentPath(key, ContentPackage);
+        public int? GetAttributeNullableInt(string key) => Element.GetAttributeNullableInt(key);
         public int GetAttributeInt(string key, int def) => Element.GetAttributeInt(key, def);
         public ushort GetAttributeUInt16(string key, ushort def) => Element.GetAttributeUInt16(key, def);
         public int[]? GetAttributeIntArray(string key, int[]? def) => Element.GetAttributeIntArray(key, def);
         public ushort[]? GetAttributeUshortArray(string key, ushort[]? def) => Element.GetAttributeUshortArray(key, def);
+        public float? GetAttributeNullableFloat(string key) => Element.GetAttributeNullableFloat(key);
         public float GetAttributeFloat(string key, float def) => Element.GetAttributeFloat(key, def);
         public float[]? GetAttributeFloatArray(string key, float[]? def) => Element.GetAttributeFloatArray(key, def);
         public float GetAttributeFloat(float def, params string[] keys) => Element.GetAttributeFloat(def, keys);
@@ -93,6 +95,7 @@ namespace Barotrauma
         public Rectangle GetAttributeRect(string key, in Rectangle def) => Element.GetAttributeRect(key, def);
         public Version GetAttributeVersion(string key, Version def) => Element.GetAttributeVersion(key, def);
         public T GetAttributeEnum<T>(string key, in T def) where T : struct, Enum => Element.GetAttributeEnum(key, def);
+        public T[] GetAttributeEnumArray<T>(string key, T[] def) where T : struct, Enum => Element.GetAttributeEnumArray(key, def);
         public (T1, T2) GetAttributeTuple<T1, T2>(string key, in (T1, T2) def) => Element.GetAttributeTuple(key, def);
         public (T1, T2)[] GetAttributeTupleArray<T1, T2>(string key, in (T1, T2)[] def) => Element.GetAttributeTupleArray(key, def);
         public Range<int> GetAttributeRange(string key, in Range<int> def) => Element.GetAttributeRange(key, def);

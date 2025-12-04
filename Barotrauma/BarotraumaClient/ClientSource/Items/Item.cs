@@ -130,7 +130,7 @@ namespace Barotrauma
             }
         }
 
-        public float GetDrawDepth()
+        public override float GetDrawDepth()
         {
             return GetDrawDepth(SpriteDepth + DrawDepthOffset, Sprite);
         }
@@ -287,7 +287,7 @@ namespace Barotrauma
             }
             else
             {
-                int padding = 100;
+                int padding = 0;
 
                 RectangleF boundingBox = GetTransformedQuad().BoundingAxisAlignedRectangle;
                 Vector2 min = new Vector2(-boundingBox.Width / 2 - padding, -boundingBox.Height / 2 - padding);
@@ -302,11 +302,11 @@ namespace Barotrauma
                 }
                 foreach (DecorativeSprite decorativeSprite in Prefab.DecorativeSprites)
                 {
-                    float scale = decorativeSprite.GetScale(spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale;
-                    min.X = Math.Min(-decorativeSprite.Sprite.size.X * decorativeSprite.Sprite.RelativeOrigin.X * scale, min.X);
-                    min.Y = Math.Min(-decorativeSprite.Sprite.size.Y * (1.0f - decorativeSprite.Sprite.RelativeOrigin.Y) * scale, min.Y);
-                    max.X = Math.Max(decorativeSprite.Sprite.size.X * (1.0f - decorativeSprite.Sprite.RelativeOrigin.X) * scale, max.X);
-                    max.Y = Math.Max(decorativeSprite.Sprite.size.Y * decorativeSprite.Sprite.RelativeOrigin.Y * scale, max.Y);
+                    Vector2 scale = decorativeSprite.GetScale(ref spriteAnimState[decorativeSprite].ScaleState, spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale;
+                    min.X = Math.Min(-decorativeSprite.Sprite.size.X * decorativeSprite.Sprite.RelativeOrigin.X * scale.X, min.X);
+                    min.Y = Math.Min(-decorativeSprite.Sprite.size.Y * (1.0f - decorativeSprite.Sprite.RelativeOrigin.Y) * scale.Y, min.Y);
+                    max.X = Math.Max(decorativeSprite.Sprite.size.X * (1.0f - decorativeSprite.Sprite.RelativeOrigin.X) * scale.X, max.X);
+                    max.Y = Math.Max(decorativeSprite.Sprite.size.Y * decorativeSprite.Sprite.RelativeOrigin.Y * scale.Y, max.Y);
                 }
                 cachedVisibleExtents = extents = new Rectangle(min.ToPoint(), max.ToPoint());
             }
@@ -324,9 +324,9 @@ namespace Barotrauma
             Draw(spriteBatch, editing, back, overrideColor: null);
         }
 
-        public void Draw(SpriteBatch spriteBatch, bool editing, bool back = true, Color? overrideColor = null)
+        public void Draw(SpriteBatch spriteBatch, bool editing, bool back = true, Color? overrideColor = null, float? overrideDepth = null)
         {
-            if (!Visible || (!editing && HiddenInGame) || !SubEditorScreen.IsLayerVisible(this)) { return; }
+            if (!Visible || (!editing && IsHidden) || !SubEditorScreen.IsLayerVisible(this)) { return; }
 
             if (editing)
             {
@@ -392,7 +392,7 @@ namespace Barotrauma
                 }
             }
 
-            float depth = GetDrawDepth();
+            float depth = overrideDepth ?? GetDrawDepth();
             if (isWiringMode && isLogic && !PlayerInput.IsShiftDown()) { depth = 0.01f; }
             if (activeSprite != null)
             {
@@ -405,7 +405,7 @@ namespace Barotrauma
                     fadeInBrokenSprite.Sprite.effects ^= SpriteEffects;
                 }
 
-                if (body == null)
+                if (body == null || body.BodyType == BodyType.Static)
                 {
                     if (Prefab.ResizeHorizontal || Prefab.ResizeVertical)
                     {
@@ -424,7 +424,7 @@ namespace Barotrauma
                                     textureScale: Vector2.One * Scale,
                                     depth: d);
                             }
-                            DrawDecorativeSprites(spriteBatch, DrawPosition, flippedX && Prefab.CanSpriteFlipX, flippedY && Prefab.CanSpriteFlipY, rotation: 0, depth);
+                            DrawDecorativeSprites(spriteBatch, DrawPosition, FlippedX && Prefab.CanSpriteFlipX, FlippedY && Prefab.CanSpriteFlipY, rotation: 0, depth, overrideColor);
                         }
                     }
                     else
@@ -445,7 +445,7 @@ namespace Barotrauma
                             Prefab.DamagedInfectedSprite?.Draw(spriteBatch, new Vector2(DrawPosition.X, -DrawPosition.Y) + drawOffset, Infector.HealthColor, Prefab.DamagedInfectedSprite.Origin, RotationRad, Scale, activeSprite.effects, depth - 0.002f);
                         }
 
-                        DrawDecorativeSprites(spriteBatch, DrawPosition, flippedX && Prefab.CanSpriteFlipX, flippedY && Prefab.CanSpriteFlipY, -RotationRad, depth);
+                        DrawDecorativeSprites(spriteBatch, DrawPosition, FlippedX && Prefab.CanSpriteFlipX, FlippedY && Prefab.CanSpriteFlipY, -RotationRad, depth, overrideColor);
                     }
                 }
                 else if (body.Enabled)
@@ -456,30 +456,50 @@ namespace Barotrauma
                         //don't draw the item on hands if it's also being worn
                         if (GetComponent<Wearable>() is { IsActive: true }) { return; }
                         if (!back) { return; }
-                        float depthStep = 0.000001f;
                         if (holdable.Picker.Inventory?.GetItemInLimbSlot(InvSlotType.RightHand) == this)
                         {
-                            Limb holdLimb = holdable.Picker.AnimController.GetLimb(LimbType.RightArm);
-                            if (holdLimb?.ActiveSprite != null)
-                            {
-                                depth = holdLimb.ActiveSprite.Depth + holdable.Picker.AnimController.GetDepthOffset() + depthStep * 2;
-                                foreach (WearableSprite wearableSprite in holdLimb.WearingItems)
-                                {
-                                    if (!wearableSprite.InheritLimbDepth && wearableSprite.Sprite != null) { depth = Math.Max(wearableSprite.Sprite.Depth + depthStep, depth); }
-                                }
-                            }
+                            depth = GetHeldItemDepth(LimbType.RightHand, holdable, depth);
                         }
                         else if (holdable.Picker.Inventory?.GetItemInLimbSlot(InvSlotType.LeftHand) == this)
                         {
-                            Limb holdLimb = holdable.Picker.AnimController.GetLimb(LimbType.LeftArm);
+                            depth = GetHeldItemDepth(LimbType.LeftHand, holdable, depth);
+                        }
+
+                        static float GetHeldItemDepth(LimbType limb, Holdable holdable, float depth)
+                        {
+                            if (holdable?.Picker?.AnimController == null) { return depth; }
+                            //offset used to make sure the item draws just slightly behind the right hand, or slightly in front of the left hand
+                            float limbDepthOffset = 0.000001f;
+                            float depthOffset = holdable.Picker.AnimController.GetDepthOffset();
+                            //use the upper arm as a reference, to ensure the item gets drawn behind / in front of the whole arm (not just the forearm)
+                            Limb holdLimb = holdable.Picker.AnimController.GetLimb(limb == LimbType.RightHand ? LimbType.RightArm : LimbType.LeftArm);
                             if (holdLimb?.ActiveSprite != null)
                             {
-                                depth = holdLimb.ActiveSprite.Depth + holdable.Picker.AnimController.GetDepthOffset() - depthStep * 2;
+                                depth = 
+                                    holdLimb.ActiveSprite.Depth 
+                                    + depthOffset 
+                                    + limbDepthOffset * 2 * (limb == LimbType.RightHand ? 1 : -1);
                                 foreach (WearableSprite wearableSprite in holdLimb.WearingItems)
                                 {
-                                    if (!wearableSprite.InheritLimbDepth && wearableSprite.Sprite != null) { depth = Math.Min(wearableSprite.Sprite.Depth - depthStep, depth); }
+                                    if (!wearableSprite.InheritLimbDepth && wearableSprite.Sprite != null) 
+                                    { 
+                                        depth =
+                                            limb == LimbType.RightHand ?
+                                                Math.Max(wearableSprite.Sprite.Depth + limbDepthOffset, depth) : 
+                                                Math.Min(wearableSprite.Sprite.Depth - limbDepthOffset, depth);
+                                    }
+                                }
+                                var head = holdable.Picker.AnimController.GetLimb(LimbType.Head);
+                                if (head?.Sprite != null)
+                                {
+                                    //ensure the holdable item is always drawn in front of the head no matter what the wearables or whatnot do with the sprite depths
+                                    depth =
+                                        limb == LimbType.RightHand ?
+                                            Math.Min(head.Sprite.Depth + depthOffset - limbDepthOffset, depth) :
+                                            Math.Max(head.Sprite.Depth + depthOffset + limbDepthOffset, depth);
                                 }
                             }
+                            return depth;
                         }
                     }
                     Vector2 origin = GetSpriteOrigin(activeSprite);
@@ -489,7 +509,7 @@ namespace Barotrauma
                         float d = Math.Min(depth + (fadeInBrokenSprite.Sprite.Depth - activeSprite.Depth - 0.000001f), 0.999f);
                         body.Draw(spriteBatch, fadeInBrokenSprite.Sprite, color * fadeInBrokenSpriteAlpha, d, Scale);
                     }
-                    DrawDecorativeSprites(spriteBatch, body.DrawPosition, flipX: body.Dir < 0, flipY: false, rotation: body.Rotation, depth: depth);
+                    DrawDecorativeSprites(spriteBatch, body.DrawPosition, flipX: body.Dir < 0, flipY: false, rotation: body.Rotation, depth, overrideColor);
                 }
 
                 foreach (var upgrade in Upgrades)
@@ -501,10 +521,10 @@ namespace Barotrauma
                         if (!spriteAnimState[decorativeSprite].IsActive) { continue; }
                         float rotation = decorativeSprite.GetRotation(ref spriteAnimState[decorativeSprite].RotationState, spriteAnimState[decorativeSprite].RandomRotationFactor);
                         Vector2 offset = decorativeSprite.GetOffset(ref spriteAnimState[decorativeSprite].OffsetState, spriteAnimState[decorativeSprite].RandomOffsetMultiplier, -RotationRad) * Scale;
-                        if (flippedX && Prefab.CanSpriteFlipX) { offset.X = -offset.X; }
-                        if (flippedY && Prefab.CanSpriteFlipY) { offset.Y = -offset.Y; }
-                        decorativeSprite.Sprite.Draw(spriteBatch, new Vector2(DrawPosition.X + offset.X, -(DrawPosition.Y + offset.Y)), color,
-                            rotation, decorativeSprite.GetScale(spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale, activeSprite.effects,
+                        if (FlippedX && Prefab.CanSpriteFlipX) { offset.X = -offset.X; }
+                        if (FlippedY && Prefab.CanSpriteFlipY) { offset.Y = -offset.Y; }
+                        decorativeSprite.Sprite.Draw(spriteBatch, new Vector2(DrawPosition.X + offset.X, -(DrawPosition.Y + offset.Y)), color, decorativeSprite.Sprite.Origin,
+                            rotation, decorativeSprite.GetScale(ref spriteAnimState[decorativeSprite].ScaleState, spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale, activeSprite.effects,
                             depth: depth + (decorativeSprite.Sprite.Depth - activeSprite.Depth));
                     }
                 }
@@ -520,7 +540,7 @@ namespace Barotrauma
             //causing them to be removed from the list
             for (int i = drawableComponents.Count - 1; i >= 0; i--)
             {
-                drawableComponents[i].Draw(spriteBatch, editing, depth, overrideColor);
+                drawableComponents[i].Draw(spriteBatch, editing && !GameMain.SubEditorScreen.TransformWidgetSelected, depth, overrideColor);
             }
 
             if (GameMain.DebugDraw)
@@ -617,11 +637,11 @@ namespace Barotrauma
             }
         }
 
-        public void DrawDecorativeSprites(SpriteBatch spriteBatch, Vector2 drawPos, bool flipX, bool flipY, float rotation, float depth)
+        public void DrawDecorativeSprites(SpriteBatch spriteBatch, Vector2 drawPos, bool flipX, bool flipY, float rotation, float depth, Color? overrideColor = null)
         {
             foreach (var decorativeSprite in Prefab.DecorativeSprites)
             {
-                Color decorativeSpriteColor = GetSpriteColor(decorativeSprite.Color).Multiply(GetSpriteColor(spriteColor));
+                Color decorativeSpriteColor = overrideColor ?? GetSpriteColor(decorativeSprite.Color).Multiply(GetSpriteColor(spriteColor));
                 if (!spriteAnimState[decorativeSprite].IsActive) { continue; }
 
                 Vector2 offset = decorativeSprite.GetOffset(ref spriteAnimState[decorativeSprite].OffsetState, spriteAnimState[decorativeSprite].RandomOffsetMultiplier,
@@ -653,14 +673,8 @@ namespace Barotrauma
                         origin.Y = -origin.Y + decorativeSprite.Sprite.size.Y;
                         spriteEffects |= SpriteEffects.FlipVertically;
                     }
-                    if (body != null)
-                    {
-                        var ca = MathF.Cos(-body.DrawRotation);
-                        var sa = MathF.Sin(-body.DrawRotation);
-                        offset = new Vector2(ca * offset.X + sa * offset.Y, -sa * offset.X + ca * offset.Y);
-                    }
                     decorativeSprite.Sprite.Draw(spriteBatch, new Vector2(drawPos.X + offset.X, -(drawPos.Y + offset.Y)), decorativeSpriteColor, origin,
-                        -rotation + spriteRotation, decorativeSprite.GetScale(spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale, spriteEffects,
+                        -rotation + spriteRotation, decorativeSprite.GetScale(ref spriteAnimState[decorativeSprite].ScaleState, spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale, spriteEffects,
                         depth: depth + (decorativeSprite.Sprite.Depth - activeSprite.Depth));
                 }
             }
@@ -775,6 +789,11 @@ namespace Barotrauma
                     }
                 }
             }
+
+            foreach (var containedItem in ContainedItems)
+            {
+                containedItem.UpdateSpriteStates(deltaTime);
+            }
         }
 
         public override void UpdateEditing(Camera cam, float deltaTime)
@@ -791,6 +810,8 @@ namespace Barotrauma
             }
 
             if (Screen.Selected != GameMain.SubEditorScreen) { return; }
+            if (Character.Controlled == null) { activeHUDs.Clear(); }
+            if (GameMain.SubEditorScreen.TransformWidgetSelected) { return; }
 
             if (GetComponent<ElectricalDischarger>() is { } discharger)
             {
@@ -803,8 +824,6 @@ namespace Barotrauma
                     discharger.IsActive = false;
                 }
             }
-
-            if (Character.Controlled == null) { activeHUDs.Clear(); }
 
             foreach (ItemComponent ic in components)
             {
@@ -1049,12 +1068,18 @@ namespace Barotrauma
 
                 foreach (RelatedItem relatedItem in requiredItems)
                 {
-                    //TODO: add to localization
                     var textBlock = new GUITextBlock(new RectTransform(new Point(listBox.Content.Rect.Width, heightScaled)),
-                        relatedItem.Type.ToString() + " required", font: GUIStyle.SmallFont)
+                        TextManager.Get($"{relatedItem.Type}.required").Fallback($"{relatedItem.Type} required"), font: GUIStyle.SmallFont)
                     {
                         Padding = new Vector4(10.0f, 0.0f, 10.0f, 0.0f)
                     };
+
+                    var tooltip = TextManager.Get($"{relatedItem.Type}.required.tooltip").Fallback(LocalizedString.EmptyString);
+                    if (!tooltip.IsNullOrWhiteSpace())
+                    {
+                        textBlock.ToolTip = tooltip;
+                    }
+                    
                     textBlock.RectTransform.IsFixedSize = true;
                     componentEditor.AddCustomContent(textBlock, 1);
 
@@ -1523,10 +1548,19 @@ namespace Barotrauma
             debugInitialHudPositions.Clear();
             foreach (ItemComponent ic in activeHUDs)
             {
-                if (ic.GuiFrame == null || ic.AllowUIOverlap || ic.GetLinkUIToComponent() != null) { continue; }
-                if (!ignoreLocking && ic.LockGuiFramePosition) { continue; }
-                //if the frame covers nearly all of the screen, don't trying to prevent overlaps because it'd fail anyway
-                if (ic.GuiFrame.Rect.Width >= GameMain.GraphicsWidth * 0.9f && ic.GuiFrame.Rect.Height >= GameMain.GraphicsHeight * 0.9f) { continue; }
+                if (ic.GuiFrame == null || ic.GetLinkUIToComponent() != null) { continue; }
+                
+                bool nearlyCoversScreen = ic.GuiFrame.Rect.Width >= GameMain.GraphicsWidth * 0.9f && 
+                                          ic.GuiFrame.Rect.Height >= GameMain.GraphicsHeight * 0.9f;
+                
+                // when we are not using overlap prevention, we still need to clamp the frame to the screen area to
+                // prevent frames becoming inaccessible outside the screen for example after a resolution change
+                if (ic.AllowUIOverlap || (!ignoreLocking && ic.LockGuiFramePosition) || nearlyCoversScreen)
+                {
+                    ic.GuiFrame.ClampToArea(new Rectangle(0, 0, GameMain.GraphicsWidth, GameMain.GraphicsHeight));
+                    continue;
+                }
+
                 ic.GuiFrame.RectTransform.ScreenSpaceOffset = ic.GuiFrameOffset;
                 elementsToMove.Add(ic.GuiFrame);
                 debugInitialHudPositions.Add(ic.GuiFrame.Rect);
@@ -1724,7 +1758,7 @@ namespace Barotrauma
             if (texts.Any() && !recreateHudTexts) { return texts; }
             texts.Clear();
 
-            string nameText = Name;
+            string nameText = RichString.Rich(Prefab.Name).SanitizedValue;
             if (Prefab.Tags.Contains("identitycard") || Tags.Contains("despawncontainer"))
             {
                 string[] readTags = Tags.Split(',');
@@ -2054,6 +2088,17 @@ namespace Barotrauma
                         }
                     }
                     break;
+                case EventType.SwapItem:
+                    ushort newId = msg.ReadUInt16();
+                    uint prefabUintId = msg.ReadUInt32();
+                    ItemPrefab newPrefab = ItemPrefab.Prefabs.FirstOrDefault(p => p.UintIdentifier == prefabUintId);
+                    if (newPrefab is null)
+                    {
+                        DebugConsole.ThrowError($"Error while reading {EventType.SwapItem} message: could not find an item prefab with the hash {prefabUintId}.");
+                        break;
+                    }
+                    ReplaceFromNetwork(newPrefab, newId);
+                    break;
                 default:
                     throw new Exception($"Malformed incoming item event: unsupported event type {eventType}");
             }
@@ -2151,6 +2196,18 @@ namespace Barotrauma
                 }
             }
 
+            //if the item is outside the level, but not in a sub, it implies the item is inside a sub server-side but the client failed to properly move it
+            // -> let's correct that by finding the correct sub
+            if (Level.IsPositionAboveLevel(WorldPosition) && Submarine == null)
+            {
+                var newSub = Submarine.FindContainingInLocalCoordinates(ConvertUnits.ToDisplayUnits(body.SimPosition), inflate: 0.0f);
+                if (newSub != null)
+                {
+                    Submarine = newSub;
+                    FindHull();
+                }
+            }
+
             Vector2 displayPos = ConvertUnits.ToDisplayUnits(body.SimPosition);
             rect.X = (int)(displayPos.X - rect.Width / 2.0f);
             rect.Y = (int)(displayPos.Y + rect.Height / 2.0f);
@@ -2229,7 +2286,13 @@ namespace Barotrauma
             if (!components.Contains(ic)) { return; }
 
             var eventData = new ComponentStateEventData(ic, extraData);
-            if (!ic.ValidateEventData(eventData)) { throw new Exception($"Component event creation failed: {typeof(T).Name}.{nameof(ItemComponent.ValidateEventData)} returned false"); }
+            if (!ic.ValidateEventData(eventData)) {
+                string errorMsg =
+                    $"Client-side component event creation for the item \"{Prefab.Identifier}\" failed: {typeof(T).Name}.{nameof(ItemComponent.ValidateEventData)} returned false. " +
+                    $"Data: {extraData?.GetType().ToString() ?? "null"}";
+                GameAnalyticsManager.AddErrorEventOnce($"Item.CreateClientEvent:ValidateEventData:{Prefab.Identifier}", GameAnalyticsManager.ErrorSeverity.Error, errorMsg);
+                throw new Exception(errorMsg);
+            }
             GameMain.Client.CreateEntityEvent(this, eventData);
         }
 
@@ -2275,6 +2338,7 @@ namespace Barotrauma
                 }
             }
 
+            bool onInsertedEffectsAppliedOnPreviousRound = msg.ReadBoolean();
             byte bodyType           = msg.ReadByte();
             bool spawnedInOutpost   = msg.ReadBoolean();
             bool allowStealing      = msg.ReadBoolean();
@@ -2309,15 +2373,15 @@ namespace Barotrauma
                 ownerSheetIndex = (x, y);
             }
             
-            bool tagsChanged        = msg.ReadBoolean();
+            bool tagsChanged = msg.ReadBoolean();
             string tags = "";
             if (tagsChanged)
             {
-                HashSet<Identifier> addedTags = msg.ReadString().Split(',').ToIdentifiers().ToHashSet();
-                HashSet<Identifier> removedTags = msg.ReadString().Split(',').ToIdentifiers().ToHashSet();
+                HashSet<Identifier> addedTags = msg.ReadString().ToIdentifiers().ToHashSet();
+                HashSet<Identifier> removedTags = msg.ReadString().ToIdentifiers().ToHashSet();
                 if (itemPrefab != null)
                 {
-                    tags = string.Join(',',itemPrefab.Tags.Where(t => !removedTags.Contains(t)).Concat(addedTags));
+                    tags = string.Join(',', itemPrefab.Tags.Where(t => !removedTags.Contains(t)).Union(addedTags));
                 }
             }
             
@@ -2387,6 +2451,10 @@ namespace Barotrauma
                     AllowStealing = allowStealing,
                     Quality = quality
                 };
+                if (onInsertedEffectsAppliedOnPreviousRound)
+                {
+                    item.OnInsertedEffectsApplied = item.OnInsertedEffectsAppliedOnPreviousRound = true;
+                }
             }
             catch (Exception e)
             {
@@ -2435,12 +2503,24 @@ namespace Barotrauma
 
             if (inventory != null)
             {
-                if (inventorySlotIndex >= 0 && inventorySlotIndex < 255 &&
-                    inventory.TryPutItem(item, inventorySlotIndex, false, false, null, false))
+                if (inventorySlotIndex is >= 0 and < 255 &&
+                    !inventory.TryPutItem(item, inventorySlotIndex, allowSwapping: false, allowCombine: false, user: null, createNetworkEvent: false, ignoreCondition: true) &&
+                    inventory.IsSlotEmpty(inventorySlotIndex))
                 {
-                    return item;
+                    //If the item won't go nicely, force it to the slot. If the server says the item is in the slot, it should go in the slot.
+                    //May happen e.g. when a character is configured to spawn with an item that won't normally go in its inventory slots.
+                    inventory.ForceToSlot(item, index: inventorySlotIndex);
                 }
-                inventory.TryPutItem(item, null, item.AllowedSlots, false);
+                else
+                {
+                    inventory.TryPutItem(item, user: null, allowedSlots: item.AllowedSlots, createNetworkEvent: false);
+                }
+                item.SetTransform(inventory.Owner.SimPosition, 0.0f);
+                item.Submarine = inventory.Owner.Submarine;
+                if (inventory.Owner is Character { Enabled: false } && item.body != null)
+                {
+                    item.body.Enabled = false;
+                }                
             }
 
             return item;

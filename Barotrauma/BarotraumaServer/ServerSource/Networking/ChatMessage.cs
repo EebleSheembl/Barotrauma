@@ -90,7 +90,7 @@ namespace Barotrauma.Networking
                 if (c.Character == null || c.Character.SpeechImpediment >= 100.0f || c.Character.IsDead) { return; }
                 if (orderMsg.Order.IsReport)
                 {
-                    HumanAIController.ReportProblem(orderMsg.Sender, orderMsg.Order);
+                    HumanAIController.ReportProblem(orderMsg.Sender as Character, orderMsg.Order);
                 }
                 if (order != null)
                 {
@@ -125,7 +125,7 @@ namespace Barotrauma.Networking
             }
             else
             {
-                GameMain.Server.SendChatMessage(txt, senderClient: c, chatMode: chatMode);
+                GameMain.Server.SendChatMessage(txt, senderClient: c, chatMode: chatMode, type: type == ChatMessageType.Team ? type : null);
             }
         }
 
@@ -166,9 +166,7 @@ namespace Barotrauma.Networking
                 }
                 else
                 {
-                    ChatMessage denyMsg = Create("", TextManager.Get("SpamFilterBlocked").Value, ChatMessageType.Server, null);
-                    c.ChatSpamTimer = 10.0f;
-                    GameMain.Server.SendDirectChatMessage(denyMsg, c);
+                    BlockBySpamFilter();
                 }
                 flaggedAsSpam = true;
                 return;
@@ -178,14 +176,20 @@ namespace Barotrauma.Networking
 
             if (c.ChatSpamTimer > 0.0f && !isSpamExempt)
             {
-                ChatMessage denyMsg = Create("", TextManager.Get("SpamFilterBlocked").Value, ChatMessageType.Server, null);
-                c.ChatSpamTimer = 10.0f;
-                GameMain.Server.SendDirectChatMessage(denyMsg, c);
+                BlockBySpamFilter();
                 flaggedAsSpam = true;
                 return;
             }
 
             flaggedAsSpam = false;
+
+            void BlockBySpamFilter()
+            {
+                ChatMessage denyMsg = Create("", TextManager.Get("SpamFilterBlocked").Value, ChatMessageType.BlockedBySpamFilter, null);
+                c.ChatSpamTimer = BlockedBySpamFilterTime;
+                GameMain.Server.SendDirectChatMessage(denyMsg, c);
+                GameServer.Log(c.Name + " blocked by spam filter", ServerLog.MessageType.ServerMessage);
+            }
         }
 
         public int EstimateLengthBytesServer(Client c)

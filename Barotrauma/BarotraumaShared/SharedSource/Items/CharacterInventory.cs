@@ -15,16 +15,39 @@ namespace Barotrauma
 
     partial class CharacterInventory : Inventory
     {
+        /// <summary>
+        /// How much access other characters have to the inventory?
+        /// </summary>
+        public enum AccessLevel
+        {
+            /// <summary>
+            /// Only accessible when character is knocked down or handcuffed.
+            /// </summary>
+            OnlyIfIncapacitated,
+            /// <summary>
+            /// Can also access inventories of bots on the same team and friendly pets.
+            /// </summary>
+            AllowBotsAndPets,
+            /// <summary>
+            /// Can also access other players in the same team (used for drag and drop give).
+            /// </summary>
+            AllowFriendly
+        }
+        
         private readonly Character character;
 
+        /// <summary>
+        /// Slot type for each inventory slot. Vanilla package has one type for each slot,
+        /// although it is technically possible to have multiple types for a single slot.
+        /// </summary>
         public InvSlotType[] SlotTypes
         {
             get;
             private set;
         }
-
-
-        public static readonly List<InvSlotType> AnySlot = new List<InvSlotType>() { InvSlotType.Any };
+        
+        public static readonly List<InvSlotType> AnySlot = new List<InvSlotType> { InvSlotType.Any };
+        public static readonly List<InvSlotType> BagSlot = new List<InvSlotType> { InvSlotType.Bag };
 
         public static bool IsHandSlotType(InvSlotType s) => s.HasFlag(InvSlotType.LeftHand) || s.HasFlag(InvSlotType.RightHand);
 
@@ -203,6 +226,22 @@ namespace Barotrauma
             return false;
         }
 
+
+        /// <summary>
+        /// Can the item be put in the inventory in a slot of the specified type (i.e. is there a suitable free slot or a stack the item can be put in).
+        /// </summary>
+        public bool CanBePut(Item item, InvSlotType slotType)
+        {
+            for (int i = 0; i < capacity; i++)
+            {
+                if (slotType.HasFlag(SlotTypes[i]))
+                {
+                    if (CanBePutInSlot(item, i)) { return true; }
+                }
+            }
+            return false;
+        }
+
         public override bool CanBePutInSlot(Item item, int i, bool ignoreCondition = false)
         {
             return 
@@ -309,8 +348,9 @@ namespace Barotrauma
                     {
                         foreach (Item existingItem in slots[slot].Items.ToList())
                         {
+                            if (!existingItem.IsInteractable(character)) { continue; }
                             existingItem.Drop(user);
-                            if (existingItem.ParentInventory != null) { existingItem.ParentInventory.RemoveItem(existingItem); }
+                            existingItem.ParentInventory?.RemoveItem(existingItem);
                         }
                     }
                 }
@@ -344,31 +384,40 @@ namespace Barotrauma
             }
 
             if (item.GetComponent<Pickable>() == null || item.AllowedSlots.None()) { return false; }
-
-            bool inSuitableSlot = false;
-            bool inWrongSlot = false;
+            
             int currentSlot = -1;
-            for (int i = 0; i < capacity; i++)
+            bool inWrongSlot = false;
+            bool inSuitableSlot = false;
+
+            // verify item's current placement
+            for (int slotIndex = 0; slotIndex < capacity; slotIndex++)
             {
-                if (slots[i].Contains(item))
+                if (!slots[slotIndex].Contains(item)) { continue; }
+                
+                // item is at least in this slot, can be in many
+                currentSlot = slotIndex;
+                
+                var firstMatchingSlotType = allowedSlots.FirstOrDefault(slot => slot.HasFlag(SlotTypes[slotIndex]));
+                
+                if (firstMatchingSlotType == default) // if (firstMatchingSlotType == InvSlotType.None)
                 {
-                    currentSlot = i;
-                    if (allowedSlots.Any(a => a.HasFlag(SlotTypes[i])))
+                    inWrongSlot = true;
+                    break;
+                }
+                
+                inSuitableSlot = true;
+                
+                // can have more than one flag, such as InvSlotType.InnerClothes | InvSlotType.OuterClothes
+                var individualFlags = EnumExtensions.GetIndividualFlags(firstMatchingSlotType);
+                
+                // if item is not in ALL required slot types
+                foreach (var flag in individualFlags)
+                {
+                    if (flag == InvSlotType.None) { continue; }
+                    if (!IsInLimbSlot(item, flag))
                     {
-                        if ((SlotTypes[i] == InvSlotType.RightHand || SlotTypes[i] == InvSlotType.LeftHand) && !allowedSlots.Contains(SlotTypes[i]))
-                        {
-                            //allowed slot = InvSlotType.RightHand | InvSlotType.LeftHand
-                            // -> make sure the item is in both hand slots
-                            inSuitableSlot = IsInLimbSlot(item, InvSlotType.RightHand) && IsInLimbSlot(item, InvSlotType.LeftHand);
-                        }
-                        else
-                        {
-                            inSuitableSlot = true;
-                        }
-                    }
-                    else if (!allowedSlots.Any(a => a.HasFlag(SlotTypes[i])))
-                    {
-                        inWrongSlot = true;
+                        inSuitableSlot = false;
+                        break;
                     }
                 }
             }
@@ -435,6 +484,8 @@ namespace Barotrauma
 
             return placedInSlot > -1;
         }
+        
+
 
         public bool IsAnySlotAvailable(Item item) => GetFreeAnySlot(item, inWrongSlot: false) > -1;
 
@@ -546,6 +597,7 @@ namespace Barotrauma
             {
                 item.AssignCampaignInteractionType(CampaignMode.InteractionType.None);
             }
+            item.Equipper = user;            
         }
 
         protected override void CreateNetworkEvent(Range slotRange)

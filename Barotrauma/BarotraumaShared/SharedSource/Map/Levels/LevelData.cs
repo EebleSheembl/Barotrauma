@@ -5,15 +5,17 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Xml.Linq;
+using Barotrauma.RuinGeneration;
 
 namespace Barotrauma
 {
     class LevelData
     {
+        [Flags]
         public enum LevelType
         {
-            LocationConnection,
-            Outpost
+            LocationConnection = 1,
+            Outpost = 2
         }
 
         public readonly LevelType Type;
@@ -47,6 +49,19 @@ namespace Barotrauma
 
         public SubmarineInfo ForceWreck;
 
+        public RuinGenerationParams ForceRuinGenerationParams;
+
+        public enum ThalamusSpawn
+        {
+            Random,
+            Forced,
+            Disabled
+        }
+        
+        public static SubmarineInfo ConsoleForceWreck;
+        public static SubmarineInfo ConsoleForceBeaconStation;
+        public static ThalamusSpawn ForceThalamus = ThalamusSpawn.Random;
+
         public bool AllowInvalidOutpost;
 
         public readonly Point Size;
@@ -74,9 +89,14 @@ namespace Barotrauma
         public readonly Dictionary<EventSet, int> FinishedEvents = new Dictionary<EventSet, int>();
 
         /// <summary>
+        /// For backwards compatibility (previously "exhausting" one event set exhausted all of them (now we use <see cref="exhaustedEventSets"/> instead).
+        /// </summary>
+        private bool allEventsExhausted;
+
+        /// <summary>
         /// 'Exhaustible' sets won't appear in the same level until after one world step (~10 min, see Map.ProgressWorld) has passed. <see cref="EventSet.Exhaustible"/>.
         /// </summary>
-        public bool EventsExhausted { get; set; }
+        private HashSet<Identifier> exhaustedEventSets = new HashSet<Identifier>();
 
         /// <summary>
         /// The crush depth of a non-upgraded submarine in in-game coordinates. Note that this can be above the top of the level!
@@ -99,6 +119,11 @@ namespace Barotrauma
                 return Math.Max(Size.Y * Physics.DisplayToRealWorldRatio, Level.DefaultRealWorldCrushDepth);
             }
         }
+        
+        /// <summary>
+        /// Inclusive (matching the min an max values is accepted).
+        /// </summary>
+        public bool IsAllowedDifficulty(float minDifficulty, float maxDifficulty) => Difficulty >= minDifficulty && Difficulty <= maxDifficulty;
 
         public LevelData(string seed, float difficulty, float sizeFactor, LevelGenerationParams generationParams, Biome biome)
         {
@@ -202,7 +227,9 @@ namespace Barotrauma
                 }
             }
 
-            EventsExhausted = element.GetAttributeBool(nameof(EventsExhausted).ToLower(), false);
+            exhaustedEventSets = element.GetAttributeIdentifierArray(nameof(exhaustedEventSets), Array.Empty<Identifier>()).ToHashSet();
+            //backwards compatibility: previously we didn't track which individual event sets have been exhausted
+            allEventsExhausted = element.GetAttributeBool("EventsExhausted", false);
         }
 
         /// <summary>
@@ -211,10 +238,11 @@ namespace Barotrauma
         public LevelData(LocationConnection locationConnection)
         {
             Seed = locationConnection.Locations[0].LevelData.Seed + locationConnection.Locations[1].LevelData.Seed;
+            bool connectionIsBiomeTransition = locationConnection.Locations[0].Biome.Identifier != locationConnection.Locations[1].Biome.Identifier;
             Biome = locationConnection.Biome;
             Type = LevelType.LocationConnection;
             Difficulty = locationConnection.Difficulty;
-            GenerationParams = LevelGenerationParams.GetRandom(Seed, LevelType.LocationConnection, Difficulty, Biome.Identifier);
+            GenerationParams = LevelGenerationParams.GetRandom(Seed, LevelType.LocationConnection, Difficulty, Biome.Identifier, biomeTransition: connectionIsBiomeTransition);
 
             float sizeFactor = MathUtils.InverseLerp(
                 MapGenerationParams.Instance.SmallLevelConnectionLength,
@@ -259,7 +287,7 @@ namespace Barotrauma
                 (int)MathUtils.Round(GenerationParams.Height, Level.GridCellSize));
         }
 
-        public static LevelData CreateRandom(string seed = "", float? difficulty = null, LevelGenerationParams generationParams = null, bool requireOutpost = false)
+        public static LevelData CreateRandom(string seed = "", float? difficulty = null, LevelGenerationParams generationParams = null, Identifier biomeId = default, bool requireOutpost = false, bool pvpOnly = false)
         {
             if (string.IsNullOrEmpty(seed))
             {
@@ -268,14 +296,21 @@ namespace Barotrauma
 
             Rand.SetSyncedSeed(ToolBox.StringToInt(seed));
 
-            LevelType type = generationParams == null ?
-                (requireOutpost ? LevelType.Outpost : LevelType.LocationConnection) :
-                 generationParams.Type;
+            LevelType type = generationParams?.Type ??
+                             (requireOutpost
+                                      ? LevelType.Outpost
+                                      : LevelType.LocationConnection);
 
             float selectedDifficulty = difficulty ?? Rand.Range(30.0f, 80.0f, Rand.RandSync.ServerAndClient);
 
-            if (generationParams == null) { generationParams = LevelGenerationParams.GetRandom(seed, type, selectedDifficulty); }
-            var biome =
+            Biome biome = null;
+            if (!biomeId.IsEmpty && biomeId != "Random")
+            {
+                Biome.Prefabs.TryGet(biomeId, out biome);
+            }
+            generationParams ??= LevelGenerationParams.GetRandom(seed, type, selectedDifficulty, pvpOnly: pvpOnly, biomeId: biomeId);
+
+            biome ??=
                 Biome.Prefabs.FirstOrDefault(b => generationParams?.AllowedBiomeIdentifiers.Contains(b.Identifier) ?? false) ??
                 Biome.Prefabs.GetRandom(Rand.RandSync.ServerAndClient);
 
@@ -301,6 +336,32 @@ namespace Barotrauma
             return levelData;
         }
 
+        /// <summary>
+        /// Marks the event set as "exhausted". Exhausted sets won't appear in the same level until after one world step (~10 min, see Map.ProgressWorld) has passed. <see cref="EventSet.Exhaustible"/>.
+        /// </summary>
+        public void ExhaustEventSet(EventSet eventSet)
+        {
+            exhaustedEventSets.Add(eventSet.Identifier);
+        }
+
+        /// <summary>
+        /// Has the event set been "exhausted"? Exhausted sets won't appear in the same level until after one world step (~10 min, see Map.ProgressWorld) has passed. <see cref="EventSet.Exhaustible"/>.
+        /// </summary>
+        public bool IsEventSetExhausted(EventSet eventSet)
+        {
+            if (allEventsExhausted) { return true; }
+            return exhaustedEventSets.Contains(eventSet.Identifier);
+        }
+
+        /// <summary>
+        /// Resets all "exhausted" event sets, allowing them to appear in the level again.
+        /// </summary>
+        public void ResetExhaustedEventSets()
+        {
+            allEventsExhausted = false;
+            exhaustedEventSets.Clear();
+        }
+
         public void ReassignGenerationParams(string seed)
         {
             GenerationParams = LevelGenerationParams.GetRandom(seed, Type, Difficulty, Biome.Identifier);
@@ -309,19 +370,36 @@ namespace Barotrauma
 
         public static IEnumerable<OutpostGenerationParams> GetSuitableOutpostGenerationParams(Location location, LevelData levelData)
         {
-            var suitableParams = OutpostGenerationParams.OutpostParams
-                    .Where(p => p.LevelType == null || levelData.Type == p.LevelType)
+            var paramsForGameMode = OutpostGenerationParams.OutpostParams.Where(p => 
+                p.AllowedGameModeIdentifiers.None() || GameMain.GameSession?.GameMode is not GameMode gameMode || p.AllowedGameModeIdentifiers.Contains(gameMode.Preset.Identifier));
+
+            var paramsWithMatchingLevelType = paramsForGameMode
+                .Where(p => p.LevelType == null || levelData.Type == p.LevelType);
+
+            //1. try finding params specifically for this location type
+            var suitableParams = paramsWithMatchingLevelType
                     .Where(p => location == null || p.AllowedLocationTypes.Contains(location.Type.Identifier));
             if (!suitableParams.Any())
             {
-                suitableParams = OutpostGenerationParams.OutpostParams
-                    .Where(p => p.LevelType == null || levelData.Type == p.LevelType)
-                    .Where(p => location == null || !p.AllowedLocationTypes.Any());
+                //2. not found, if the location type is configured to use the modules of some other location type,
+                //   see if we could use that location type's generation params
+                if (!location.Type.UseOutpostModulesOfLocationType.IsEmpty)
+                {
+                    suitableParams = paramsWithMatchingLevelType
+                        .Where(p => p.AllowedLocationTypes.Contains(location.Type.UseOutpostModulesOfLocationType));
+                }
                 if (!suitableParams.Any())
                 {
-                    DebugConsole.ThrowError($"No suitable outpost generation parameters found for the location type \"{location.Type.Identifier}\". Selecting random parameters.");
-                    suitableParams = OutpostGenerationParams.OutpostParams;
+                    //3. still not found, choose some parameters that are suitable for any location type
+                    suitableParams = paramsWithMatchingLevelType
+                              .Where(p => location == null || !p.AllowedLocationTypes.Any());
+                    if (!suitableParams.Any())
+                    {
+                        DebugConsole.ThrowError($"No suitable outpost generation parameters found for the location type \"{location.Type.Identifier}\". Selecting random parameters.");
+                        suitableParams = paramsForGameMode;
+                    }
                 }
+
             }
             return suitableParams;
         }
@@ -336,7 +414,10 @@ namespace Barotrauma
                     new XAttribute("size", XMLExtensions.PointToString(Size)),
                     new XAttribute("generationparams", GenerationParams.Identifier),
                     new XAttribute("initialdepth", InitialDepth),
-                    new XAttribute(nameof(EventsExhausted).ToLower(), EventsExhausted));
+                    new XAttribute("exhaustedeventsets", allEventsExhausted));
+
+            newElement.Add(
+                new XAttribute(nameof(exhaustedEventSets), string.Join(',', exhaustedEventSets.Select(e => e.Value))));
 
             if (HasBeaconStation)
             {

@@ -320,19 +320,19 @@ namespace Barotrauma
         {
             RectangleF worldRect = Quad2D.FromSubmarineRectangle(WorldRect).Rotated(
                 FlippedX != FlippedY
-                    ? rotationRad
-                    : -rotationRad).BoundingAxisAlignedRectangle;
+                    ? RotationRad
+                    : -RotationRad).BoundingAxisAlignedRectangle;
             Vector2 worldPos = WorldPosition;
 
             Vector2 min = new Vector2(worldRect.X, worldRect.Y);
             Vector2 max = new Vector2(worldRect.Right, worldRect.Y + worldRect.Height);
             foreach (DecorativeSprite decorativeSprite in Prefab.DecorativeSprites)
             {
-                float scale = decorativeSprite.GetScale(spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale;
-                min.X = Math.Min(worldPos.X - decorativeSprite.Sprite.size.X * decorativeSprite.Sprite.RelativeOrigin.X * scale, min.X);
-                max.X = Math.Max(worldPos.X + decorativeSprite.Sprite.size.X * (1.0f - decorativeSprite.Sprite.RelativeOrigin.X) * scale, max.X);
-                min.Y = Math.Min(worldPos.Y - decorativeSprite.Sprite.size.Y * (1.0f - decorativeSprite.Sprite.RelativeOrigin.Y) * scale, min.Y);
-                max.Y = Math.Max(worldPos.Y + decorativeSprite.Sprite.size.Y * decorativeSprite.Sprite.RelativeOrigin.Y * scale, max.Y);
+                Vector2 scale = decorativeSprite.GetScale(ref spriteAnimState[decorativeSprite].ScaleState, spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale;
+                min.X = Math.Min(worldPos.X - decorativeSprite.Sprite.size.X * decorativeSprite.Sprite.RelativeOrigin.X * scale.X, min.X);
+                max.X = Math.Max(worldPos.X + decorativeSprite.Sprite.size.X * (1.0f - decorativeSprite.Sprite.RelativeOrigin.X) * scale.X, max.X);
+                min.Y = Math.Min(worldPos.Y - decorativeSprite.Sprite.size.Y * (1.0f - decorativeSprite.Sprite.RelativeOrigin.Y) * scale.Y, min.Y);
+                max.Y = Math.Max(worldPos.Y + decorativeSprite.Sprite.size.Y * decorativeSprite.Sprite.RelativeOrigin.Y * scale.Y, max.Y);
             }
             Vector2 offset = GetCollapseEffectOffset();
             min += offset;
@@ -341,6 +341,9 @@ namespace Barotrauma
             if (min.X > worldView.Right || max.X < worldView.X) { return false; }
             if (min.Y > worldView.Y || max.Y < worldView.Y - worldView.Height) { return false; }
 
+            Vector2 extents = max - min;
+            if (extents.X * Screen.Selected.Cam.Zoom < 1.0f) { return false; }
+            if (extents.Y * Screen.Selected.Cam.Zoom < 1.0f) { return false; }
             return true;
         }
 
@@ -368,7 +371,7 @@ namespace Barotrauma
             return SpriteDepthOverrideIsSet ? SpriteOverrideDepth : Prefab.Sprite.Depth;
         }
 
-        public float GetDrawDepth()
+        public override float GetDrawDepth()
         {
             return GetDrawDepth(GetRealDepth(), Prefab.Sprite);
         }
@@ -382,7 +385,10 @@ namespace Barotrauma
                 if (!HasBody && !ShowStructures) { return; }
                 if (HasBody && !ShowWalls) { return; }
             }
-            else if (HiddenInGame) { return; }
+            else if (IsHidden) 
+            {
+                return; 
+            }
 
             Color color = IsIncludedInSelection && editing ? GUIStyle.Blue : IsHighlighted ? GUIStyle.Orange * Math.Max(spriteColor.A / (float) byte.MaxValue, 0.1f) : spriteColor;
 
@@ -445,7 +451,7 @@ namespace Barotrauma
                         MathUtils.PositiveModulo(-textureOffset.X, Prefab.BackgroundSprite.SourceRect.Width * TextureScale.X * Scale),
                         MathUtils.PositiveModulo(-textureOffset.Y, Prefab.BackgroundSprite.SourceRect.Height * TextureScale.Y * Scale));
 
-                    float rotationRad = rotationForSprite(this.rotationRad, Prefab.BackgroundSprite);
+                    float rotationRad = GetRotationForSprite(RotationRad, Prefab.BackgroundSprite);
 
                     Prefab.BackgroundSprite.DrawTiled(
                         spriteBatch,
@@ -478,7 +484,7 @@ namespace Barotrauma
 
             if (back == GetRealDepth() > 0.5f)
             {
-                Vector2 advanceX = MathUtils.RotatedUnitXRadians(this.rotationRad).FlipY();
+                Vector2 advanceX = MathUtils.RotatedUnitXRadians(RotationRad).FlipY();
                 Vector2 advanceY = advanceX.YX().FlipX();
                 if (FlippedX != FlippedY)
                 {
@@ -486,7 +492,7 @@ namespace Barotrauma
                     advanceY = advanceY.FlipX();
                 }
 
-                float sectionSpriteRotationRad = rotationForSprite(this.rotationRad, Prefab.Sprite);
+                float sectionSpriteRotationRad = GetRotationForSprite(RotationRad, Prefab.Sprite);
 
                 for (int i = 0; i < Sections.Length; i++)
                 {
@@ -495,16 +501,23 @@ namespace Barotrauma
                     {
                         float newCutoff = MathHelper.Lerp(0.0f, 0.65f, Sections[i].damage / MaxHealth);
 
-                        if (Math.Abs(newCutoff - Submarine.DamageEffectCutoff) > 0.01f || color != Submarine.DamageEffectColor)
+                        //change the parameters of the damage effect and start a new sprite batch if the damage is different by 5% or more
+                        if (Math.Abs(newCutoff - Submarine.DamageEffectCutoff) > 0.01f ||
+                            //if we were previously rendering some small amount of damage but now 0 damage, make sure we update the parameters
+                            //"no damage" vs "just a tiny fraction of damage" makes a difference, even though normally 5% differences in damage aren't noticeable
+                            MathUtils.NearlyEqual(newCutoff, 0.0f) != MathUtils.NearlyEqual(Submarine.DamageEffectCutoff, 0.0f))
                         {
+                            spriteBatch.End();
+                            spriteBatch.Begin(SpriteSortMode.Deferred,
+                                BlendState.NonPremultiplied, SamplerState.LinearWrap,
+                                null, null,
+                                damageEffect,
+                                Screen.Selected.Cam.Transform);
+
                             damageEffect.Parameters["aCutoff"].SetValue(newCutoff);
                             damageEffect.Parameters["cCutoff"].SetValue(newCutoff * 1.2f);
-                            damageEffect.Parameters["inColor"].SetValue(color.ToVector4());
-
                             damageEffect.CurrentTechnique.Passes[0].Apply();
-
                             Submarine.DamageEffectCutoff = newCutoff;
-                            Submarine.DamageEffectColor = color;
                         }
                     }
                     if (!HasDamage && i == 0)
@@ -549,23 +562,30 @@ namespace Barotrauma
                 foreach (var decorativeSprite in Prefab.DecorativeSprites)
                 {
                     if (!spriteAnimState[decorativeSprite].IsActive) { continue; }
-                    float rotation = decorativeSprite.GetRotation(ref spriteAnimState[decorativeSprite].RotationState, spriteAnimState[decorativeSprite].RandomRotationFactor) + this.rotationRad;
+                    float rotation = decorativeSprite.GetRotation(ref spriteAnimState[decorativeSprite].RotationState, spriteAnimState[decorativeSprite].RandomRotationFactor) + RotationRad;
                     Vector2 offset = decorativeSprite.GetOffset(ref spriteAnimState[decorativeSprite].OffsetState, spriteAnimState[decorativeSprite].RandomOffsetMultiplier) * Scale;
-                    Vector2 drawPos = DrawPosition + MathUtils.RotatePoint(offset, -this.rotationRad);
+                    if (FlippedX && Prefab.CanSpriteFlipX) { offset.X = -offset.X; }
+                    if (FlippedY && Prefab.CanSpriteFlipY) { offset.Y = -offset.Y; }
+                    Vector2 drawPos = DrawPosition + MathUtils.RotatePoint(offset, -this.RotationRad);
                     decorativeSprite.Sprite.Draw(
                         spriteBatch: spriteBatch,
                         pos: drawPos.FlipY(),
                         color: color,
                         rotate: rotation,
-                        scale: decorativeSprite.GetScale(spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale,
+                        origin: decorativeSprite.Sprite.Origin,
+                        scale: decorativeSprite.GetScale(ref spriteAnimState[decorativeSprite].ScaleState, spriteAnimState[decorativeSprite].RandomScaleFactor) * Scale,
                         spriteEffect: Prefab.Sprite.effects ^ SpriteEffects,
                         depth: Math.Min(depth + (decorativeSprite.Sprite.Depth - Prefab.Sprite.Depth), 0.999f));
                 }
             }
 
-            static float rotationForSprite(float rotationRad, Sprite sprite)
+            static float GetRotationForSprite(float rotationRad, Sprite sprite)
             {
-                if (sprite.effects.HasFlag(SpriteEffects.FlipHorizontally) != sprite.effects.HasFlag(SpriteEffects.FlipVertically))
+                // Use bitwise operations instead of HasFlag to avoid boxing, as this is performance-sensitive code.
+                bool flipHorizontally = (sprite.effects & SpriteEffects.FlipHorizontally) == SpriteEffects.FlipHorizontally;
+                bool flipVertically = (sprite.effects & SpriteEffects.FlipVertically) == SpriteEffects.FlipVertically;
+                
+                if (flipHorizontally != flipVertically)
                 {
                     rotationRad = -rotationRad;
                 }
@@ -597,6 +617,10 @@ namespace Barotrauma
                         if (GetSection(i).damage > 0)
                         {
                             var textPos = SectionPosition(i, true);
+                            if (Submarine != null)
+                            { 
+                                textPos += (Submarine.DrawPosition - Submarine.Position);
+                            }
                             textPos.Y = -textPos.Y;
                             GUI.DrawString(spriteBatch, textPos, "Damage: " + (int)((GetSection(i).damage / MaxHealth) * 100f) + "%", Color.Yellow);
                         }

@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Microsoft.Xna.Framework;
+using System;
 using System.Collections.Generic;
 using System.Xml.Linq;
 
@@ -8,9 +9,15 @@ namespace Barotrauma
     {
         public int Price { get; }
         public bool CanBeBought { get; }
-        //minimum number of items available at a given store
+
+        /// <summary>
+        /// Minimum number of items available at a given store
+        /// </summary>
         public int MinAvailableAmount { get; }
-        //maximum number of items available at a given store
+
+        /// <summary>
+        /// Maximum number of items available at a given store. Defaults to 20% more than the minimum amount.
+        /// </summary>
         public int MaxAvailableAmount { get; }
         /// <summary>
         /// Can the item be a Daily Special or a Requested Good
@@ -30,9 +37,19 @@ namespace Barotrauma
         public bool RequiresUnlock { get; }
 
         /// <summary>
-        /// Used when both <see cref="MinAvailableAmount"/> and <see cref="MaxAvailableAmount"/> are set to 0.
+        /// Default minimum amount when no MinAvailableAmount is defined.
         /// </summary>
-        public const int DefaultAmount = 5;
+        private const int DefaultMinAmount = 1;
+
+        /// <summary>
+        /// Default maximum amount when no MaxAvailableAmount is defined.
+        /// </summary>
+        private const int DefaultMaxAmount = 5;
+
+        /// <summary>
+        /// If set, the item is only available in outposts with this faction.
+        /// </summary>
+        public Identifier RequiredFaction { get; private set; }
 
         private readonly Dictionary<Identifier, float> minReputation = new Dictionary<Identifier, float>();
 
@@ -49,15 +66,15 @@ namespace Barotrauma
         public PriceInfo(XElement element)
         {
             Price = element.GetAttributeInt("buyprice", 0);
-            MinLevelDifficulty = element.GetAttributeInt("minleveldifficulty", 0);
+            MinLevelDifficulty = GetMinLevelDifficulty(element, 0);
             BuyingPriceMultiplier = element.GetAttributeFloat("buyingpricemultiplier", 1f);
             CanBeBought = true;
-            int minAmount = GetMinAmount(element);
-            MinAvailableAmount = Math.Min(minAmount, CargoManager.MaxQuantity);
-            int maxAmount = GetMaxAmount(element);
-            maxAmount = Math.Min(maxAmount, CargoManager.MaxQuantity);
-            MaxAvailableAmount = Math.Max(maxAmount, MinAvailableAmount);
+            MinAvailableAmount = Math.Min(GetMinAmount(element, defaultValue: DefaultMinAmount), CargoManager.MaxQuantity);
+            int maxAmount = GetMaxAmount(element, defaultValue: DefaultMaxAmount);
+            MaxAvailableAmount = MathHelper.Clamp(maxAmount, MinAvailableAmount, CargoManager.MaxQuantity);
             RequiresUnlock = element.GetAttributeBool("requiresunlock", false);
+            RequiredFaction = element.GetAttributeIdentifier(nameof(RequiredFaction), Identifier.Empty);
+            System.Diagnostics.Debug.Assert(MaxAvailableAmount >= MinAvailableAmount);
         }
 
         public PriceInfo(int price, bool canBeBought,
@@ -67,14 +84,15 @@ namespace Barotrauma
             Price = price;
             CanBeBought = canBeBought;
             MinAvailableAmount = Math.Min(minAmount, CargoManager.MaxQuantity);
+            MaxAvailableAmount = Math.Max(Math.Min(maxAmount, CargoManager.MaxQuantity), minAmount);
             BuyingPriceMultiplier = buyingPriceMultiplier;
-            maxAmount = Math.Min(maxAmount, CargoManager.MaxQuantity);
-            MaxAvailableAmount = Math.Max(maxAmount, minAmount);
             MinLevelDifficulty = minLevelDifficulty;
             CanBeSpecial = canBeSpecial;
             DisplayNonEmpty = displayNonEmpty;
             StoreIdentifier = new Identifier(storeIdentifier);
             RequiresUnlock = requiresUnlock;
+
+            System.Diagnostics.Debug.Assert(MaxAvailableAmount >= MinAvailableAmount);
         }
 
         private void LoadReputationRestrictions(XElement priceInfoElement)
@@ -95,26 +113,27 @@ namespace Barotrauma
             var priceInfos = new List<PriceInfo>();
             defaultPrice = null;
             int basePrice = element.GetAttributeInt("baseprice", 0);
-            int minAmount = GetMinAmount(element);
-            int maxAmount = GetMaxAmount(element);
-            int minLevelDifficulty = element.GetAttributeInt("minleveldifficulty", 0);
+            int minAmount = GetMinAmount(element, defaultValue: DefaultMinAmount);
+            int maxAmount = GetMaxAmount(element, defaultValue: DefaultMaxAmount);
+            int minLevelDifficulty = GetMinLevelDifficulty(element, 0);
             bool canBeSpecial = element.GetAttributeBool("canbespecial", true);
             float buyingPriceMultiplier = element.GetAttributeFloat("buyingpricemultiplier", 1f);
             bool displayNonEmpty = element.GetAttributeBool("displaynonempty", false);
-            bool soldByDefault = element.GetAttributeBool("sold", element.GetAttributeBool("soldbydefault", true));
+            bool soldByDefault = GetSold(element, element.GetAttributeBool("soldbydefault", true));
             bool requiresUnlock = element.GetAttributeBool("requiresunlock", false);
+            Identifier requiredFactionByDefault = element.GetAttributeIdentifier(nameof(RequiredFaction), Identifier.Empty);
             foreach (XElement childElement in element.GetChildElements("price"))
             {
                 float priceMultiplier = childElement.GetAttributeFloat("multiplier", 1.0f);
-                bool sold = childElement.GetAttributeBool("sold", soldByDefault); 
-                int storeMinLevelDifficulty = childElement.GetAttributeInt("minleveldifficulty", minLevelDifficulty);
+                bool sold = GetSold(childElement, soldByDefault); 
+                int storeMinLevelDifficulty = GetMinLevelDifficulty(childElement, minLevelDifficulty);
                 float storeBuyingMultiplier = childElement.GetAttributeFloat("buyingpricemultiplier", buyingPriceMultiplier);
                 string backwardsCompatibleIdentifier = childElement.GetAttributeString("locationtype", "");
                 if (!string.IsNullOrEmpty(backwardsCompatibleIdentifier))
                 {
                     backwardsCompatibleIdentifier = $"merchant{backwardsCompatibleIdentifier}";
                 }
-                string storeIdentifier = childElement.GetAttributeString("storeidentifier", backwardsCompatibleIdentifier);
+                string storeIdentifier = GetStoreIdentifier(childElement, backwardsCompatibleIdentifier);
                 // TODO: Add some error messages if we have defined the min or max amount while the item is not sold
                 var priceInfo = new PriceInfo(price: (int)(priceMultiplier * basePrice),
                     canBeBought: sold,
@@ -125,7 +144,10 @@ namespace Barotrauma
                     buyingPriceMultiplier: storeBuyingMultiplier,
                     displayNonEmpty: displayNonEmpty,
                     requiresUnlock: requiresUnlock,
-                    storeIdentifier: storeIdentifier);
+                    storeIdentifier: storeIdentifier)
+                {
+                    RequiredFaction = childElement.GetAttributeIdentifier(nameof(RequiredFaction), requiredFactionByDefault)
+                };
                 priceInfo.LoadReputationRestrictions(childElement);
                 priceInfos.Add(priceInfo);
             }
@@ -138,17 +160,48 @@ namespace Barotrauma
                 minLevelDifficulty: minLevelDifficulty,
                 buyingPriceMultiplier: buyingPriceMultiplier,
                 displayNonEmpty: displayNonEmpty,
-                requiresUnlock: requiresUnlock);
+                requiresUnlock: requiresUnlock)
+            {
+                RequiredFaction = requiredFactionByDefault
+            };
             defaultPrice.LoadReputationRestrictions(element);
             return priceInfos;
         }
 
-        private static int GetMinAmount(XElement element, int defaultValue = 0) => element != null ?
-            element.GetAttributeInt("minamount", element.GetAttributeInt("minavailable", defaultValue)) :
-            defaultValue;
+        private static int GetMinAmount(XElement element, int defaultValue) => 
+            element?.GetAttributeInt("minamount", element.GetAttributeInt("minavailable", defaultValue)) ?? defaultValue;
 
-        private static int GetMaxAmount(XElement element, int defaultValue = 0) => element != null ?
-            element.GetAttributeInt("maxamount", element.GetAttributeInt("maxavailable", defaultValue)) :
-            defaultValue;
+        private static int GetMaxAmount(XElement element, int defaultValue) => 
+            element?.GetAttributeInt("maxamount", element.GetAttributeInt("maxavailable", defaultValue)) ?? defaultValue;
+        
+        public static bool HasMinAmountDefined(XElement element) => element != null &&
+            (element.GetAttribute("minamount") != null || element.GetAttribute("minavailable") != null);
+
+        public static bool HasMaxAmountDefined(XElement element) => element != null &&
+            (element.GetAttribute("maxamount") != null || element.GetAttribute("maxavailable") != null);
+
+        public static bool HasSoldDefined(XElement element) => element != null &&
+            element.GetAttribute("sold") != null;
+
+        public static string GetMinAmountString(XElement element)
+        {
+            if (element == null) { return null; }
+            return element.GetAttributeString("minamount", null) ?? element.GetAttributeString("minavailable", null);
+        }
+
+        public static string GetMaxAmountString(XElement element)
+        {
+            if (element == null) { return null; }
+            return element.GetAttributeString("maxamount", null) ?? element.GetAttributeString("maxavailable", null);
+        }
+        
+        public static bool GetSold(XElement element, bool defaultValue = true) => 
+            element?.GetAttributeBool("sold", defaultValue) ?? defaultValue;
+
+        public static int GetMinLevelDifficulty(XElement element, int defaultValue = 0) => 
+            element?.GetAttributeInt("minleveldifficulty", defaultValue) ?? defaultValue;
+
+        public static string GetStoreIdentifier(XElement element, string defaultValue = "unknown") => 
+            element?.GetAttributeString("storeidentifier", defaultValue) ?? defaultValue;
     }
 }

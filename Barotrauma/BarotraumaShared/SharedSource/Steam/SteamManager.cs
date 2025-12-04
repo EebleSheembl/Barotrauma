@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -230,11 +230,26 @@ namespace Barotrauma.Steam
             return true;
         }
 
+
+        public static bool TryGetAllAvailableAchievements(out List<Steamworks.Data.Achievement> achievements)
+        {
+            if (!IsInitialized || !Steamworks.SteamClient.IsValid) 
+            {
+                achievements = null;
+                return false; 
+            }
+            achievements = Steamworks.SteamUserStats.Achievements.ToList();
+            return true;
+        }
+
         public static void Update(float deltaTime)
         {
             //this should be run even if SteamManager is uninitialized
             //servers need to be able to notify clients of unlocked talents even if the server isn't connected to Steam
             AchievementManager.Update(deltaTime);
+#if CLIENT
+            SteamTimelineManager.Update(deltaTime);
+#endif
 
             if (!IsInitialized) { return; }
 

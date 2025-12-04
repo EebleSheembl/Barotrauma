@@ -27,6 +27,10 @@ namespace Barotrauma
         
         private DateTime lastRefreshTime = DateTime.Now;
 
+        // Cache for spam-filtered servers to avoid re-checking on every filter change
+        private readonly HashSet<string> spamServerCache = new HashSet<string>();
+        private readonly Dictionary<string, string> serverInfoStringCache = new Dictionary<string, string>();
+
         private GUIFrame menu;
 
         private GUIListBox serverList;
@@ -465,32 +469,37 @@ namespace Barotrauma
 
                         bool noneSelected = langTickboxes.All(tb => !tb.Selected);
                         bool allSelected = langTickboxes.All(tb => tb.Selected);
-
                         if (allSelected != allTickbox.Selected)
                         {
                             allTickbox.Selected = allSelected;
                         }
 
-                        if (allSelected)
-                        {
-                            languageDropdown.Text = TextManager.Get(allLanguagesKey);
-                        }
-                        else if (noneSelected)
-                        {
-                            languageDropdown.Text = TextManager.Get("None");
-                        }
-
-                        var languages = languageDropdown.SelectedDataMultiple.OfType<LanguageIdentifier>();
-
-                        ServerListFilters.Instance.SetAttribute(languageKey, string.Join(", ", languages));
-                        GameSettings.SaveCurrentConfig();
                         return true;
                     }
                     finally
                     {
                         inSelectedCall = false;
-                        FilterServers();
                     }
+                };
+                languageDropdown.AfterSelected = (_, userData) =>
+                {
+                    bool noneSelected = langTickboxes.All(tb => !tb.Selected);
+                    bool allSelected = langTickboxes.All(tb => tb.Selected);
+                    if (allSelected)
+                    {
+                        languageDropdown.Text = TextManager.Get(allLanguagesKey);
+                    }
+                    else if (noneSelected)
+                    {
+                        languageDropdown.Text = TextManager.Get("None");
+                    }
+
+                    var languages = languageDropdown.SelectedDataMultiple.OfType<LanguageIdentifier>();
+
+                    ServerListFilters.Instance.SetAttribute(languageKey, string.Join(", ", languages));
+                    GameSettings.SaveCurrentConfig();
+                    FilterServers();
+                    return true;
                 };
             }
             
@@ -998,6 +1007,8 @@ namespace Barotrauma
         
         private bool ShouldShowServer(ServerInfo serverInfo)
         {
+            if (serverInfo == null) { return false; }
+
 #if !DEBUG
             //never show newer versions
             //(ignore revision number, it doesn't affect compatibility)
@@ -1006,7 +1017,6 @@ namespace Barotrauma
                 return false;
             }
 #endif
-            if (SpamServerFilters.IsFiltered(serverInfo)) { return false; }
 
             if (!string.IsNullOrEmpty(searchBox.Text) && !serverInfo.ServerName.Contains(searchBox.Text, StringComparison.OrdinalIgnoreCase)) { return false; }
 
@@ -1209,6 +1219,11 @@ namespace Barotrauma
 
             PingUtils.QueryPingData();
 
+            // Clear spam server cache to allow re-checking servers (user might have changed filters)
+            spamServerCache.Clear();
+            // Also clear server info string cache when manually refreshing, just so we don't end up with broken data in any situation
+            serverInfoStringCache.Clear();
+
             tabs[TabEnum.All].Clear();
             serverList.ClearChildren();
             serverPreview.Content.ClearChildren();
@@ -1312,29 +1327,30 @@ namespace Barotrauma
             const float MinSimilarityPercentage = 0.8f;
 
             if (string.IsNullOrWhiteSpace(serverInfo.ServerName)) { return; }
-            if (serverInfo.PlayerCount > serverInfo.MaxPlayers) { return; }
+
+            if (serverInfo.ServerName.Length > NetConfig.ServerNameMaxLength) { return; }
+            /*no newline symbols in server names!*/
+            if (serverInfo.ServerName.Contains('\n') || serverInfo.ServerName.Contains('\r')) { return; }
+            if (serverInfo.ServerMessage.Length > NetConfig.ServerMessageMaxLength) { return; }
+            //+1 because it seems the count can sometimes be slightly off (something to do with steam lobbies not immediately refreshing?)
+            if (serverInfo.PlayerCount > serverInfo.MaxPlayers + 1) { return; }
             if (serverInfo.PlayerCount < 0) { return; }
             if (serverInfo.MaxPlayers <= 0) { return; }
+            if (!serverInfo.SelectedSub.IsNullOrEmpty())
+            {
+                if (serverInfo.SelectedSub.Length > SubmarineInfo.MaxNameLength) { return; }
+            }
             //no way a legit server can have this many players
             if (serverInfo.MaxPlayers > MaxAllowedPlayers) { return; }
 
-            int similarServerCount = 0;
-            string serverInfoStr = getServerInfoStr(serverInfo);
-            foreach (var serverElement in serverList.Content.Children)
+            // Check spam filter with caching to avoid re-checking on every filter change
+            string serverCacheKey = serverInfo.Endpoints.First().StringRepresentation;
+            if (spamServerCache.Contains(serverCacheKey)) { return; }
+            if (SpamServerFilters.IsFiltered(serverInfo))
             {
-                if (!serverElement.Visible) { continue; }
-                if (serverElement.UserData is not ServerInfo otherServer || otherServer == serverInfo) { continue; }
-                if (ToolBox.LevenshteinDistance(serverInfoStr, getServerInfoStr(otherServer)) < serverInfoStr.Length * (1.0f - MinSimilarityPercentage))
-                {
-                    similarServerCount++;
-                    if (similarServerCount > MaxAllowedSimilarServers) 
-                    {  
-                        DebugConsole.Log($"Server {serverInfo.ServerName} seems to be almost identical to {otherServer.ServerName}. Hiding as a potential spam server.");
-                        break;
-                    }
-                }
+                spamServerCache.Add(serverCacheKey);
+                return;
             }
-            if (similarServerCount > MaxAllowedSimilarServers) { return; }
 
             static string getServerInfoStr(ServerInfo serverInfo)
             {
@@ -1342,6 +1358,35 @@ namespace Barotrauma
                 if (str.Length > 200) { return str.Substring(0, 200); }
                 return str;
             }
+
+            string getCachedServerInfoStr(ServerInfo serverInfo)
+            {
+                string cacheKey = serverInfo.Endpoints.First().StringRepresentation;
+                if (!serverInfoStringCache.TryGetValue(cacheKey, out string cachedStr))
+                {
+                    cachedStr = getServerInfoStr(serverInfo);
+                    serverInfoStringCache[cacheKey] = cachedStr;
+                }
+                return cachedStr;
+            }
+
+            int similarServerCount = 0;
+            string serverInfoStr = getServerInfoStr(serverInfo);
+            foreach (var serverElement in serverList.Content.Children)
+            {
+                if (!serverElement.Visible) { continue; }
+                if (serverElement.UserData is not ServerInfo otherServer || otherServer == serverInfo) { continue; }
+                if (ToolBox.LevenshteinDistance(serverInfoStr, getCachedServerInfoStr(otherServer)) < serverInfoStr.Length * (1.0f - MinSimilarityPercentage))
+                {
+                    similarServerCount++;
+                    if (similarServerCount > MaxAllowedSimilarServers)
+                    {
+                        DebugConsole.Log($"Server {serverInfo.ServerName} seems to be almost identical to {otherServer.ServerName}. Hiding as a potential spam server.");
+                        break;
+                    }
+                }
+            }
+            if (similarServerCount > MaxAllowedSimilarServers) { return; }
 
             RemoveMsgFromServerList(MsgUserData.RefreshingServerList);
             RemoveMsgFromServerList(MsgUserData.NoServers);

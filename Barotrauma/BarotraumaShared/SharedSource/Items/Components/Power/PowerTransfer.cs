@@ -1,4 +1,5 @@
-﻿using Microsoft.Xna.Framework;
+﻿using Barotrauma.Extensions;
+using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -176,18 +177,7 @@ namespace Barotrauma.Items.Components
         {
             RefreshConnections();
 
-            if (Timing.TotalTime > extraLoadSetTime + 1.0)
-            {
-                //Decay the extra load to 0 from either positive or negative
-                if (extraLoad > 0)
-                {
-                    extraLoad = Math.Max(extraLoad - 1000.0f * deltaTime, 0);
-                }
-                else
-                {
-                    extraLoad = Math.Min(extraLoad + 1000.0f * deltaTime, 0);
-                }
-            }
+            UpdateExtraLoad(deltaTime);
 
             if (!CanTransfer) { return; }
 
@@ -199,6 +189,28 @@ namespace Barotrauma.Items.Components
 
             ApplyStatusEffects(ActionType.OnActive, deltaTime);
 
+            SendSignals();
+
+            UpdateOvervoltage(deltaTime);
+        }
+
+        protected virtual void UpdateExtraLoad(float deltaTime)
+        {
+            if (Timing.TotalTime <= extraLoadSetTime + 1.0) { return; }
+
+            //Decay the extra load to 0 from either positive or negative
+            if (extraLoad > 0)
+            {
+                extraLoad = Math.Max(extraLoad - 1000.0f * deltaTime, 0);
+            }
+            else
+            {
+                extraLoad = Math.Min(extraLoad + 1000.0f * deltaTime, 0);
+            }
+        }
+
+        protected virtual void SendSignals()
+        {
             float powerReadingOut = 0;
             float loadReadingOut = ExtraLoad;
             if (powerLoad < 0)
@@ -225,54 +237,56 @@ namespace Barotrauma.Items.Components
             }
             item.SendSignal(powerSignal, "power_value_out");
             item.SendSignal(loadSignal, "load_value_out");
+        }
 
+        protected virtual void UpdateOvervoltage(float deltaTime)
+        {
             //if the item can't be fixed, don't allow it to break
             if (!item.Repairables.Any() || !CanBeOverloaded) { return; }
 
             float maxOverVoltage = Math.Max(OverloadVoltage, 1.0f);
 
-            Overload = Voltage > maxOverVoltage;
+            Overload = Voltage > maxOverVoltage && GameMain.GameSession is not { RoundDuration: < 5 };
 
-            if (Overload && (GameMain.NetworkMember == null || GameMain.NetworkMember.IsServer))
+            if (!Overload || GameMain.NetworkMember is { IsClient: true }) { return; }
+
+            if (overloadCooldownTimer > 0.0f)
             {
-                if (overloadCooldownTimer > 0.0f)
-                {
-                    overloadCooldownTimer -= deltaTime;
-                    return;
-                }
+                overloadCooldownTimer -= deltaTime;
+                return;
+            }
 
-                //damage the item if voltage is too high (except if running as a client)
-                float prevCondition = item.Condition;
-                //some randomness to prevent all junction boxes from breaking at the same time
-                if (Rand.Range(0.0f, 1.0f) < 0.01f)
-                {
-                    //damaged boxes are more sensitive to overvoltage (also preventing all boxes from breaking at the same time)
-                    float conditionFactor = MathHelper.Lerp(5.0f, 1.0f, item.Condition / item.MaxCondition);
-                    item.Condition -= deltaTime * Rand.Range(10.0f, 500.0f) * conditionFactor;
-                }
-                if (item.Condition <= 0.0f && prevCondition > 0.0f)
-                {
-                    overloadCooldownTimer = OverloadCooldown;
+            //damage the item if voltage is too high (except if running as a client)
+            float prevCondition = item.Condition;
+            //some randomness to prevent all junction boxes from breaking at the same time
+            if (Rand.Range(0.0f, 1.0f) < 0.01f)
+            {
+                //damaged boxes are more sensitive to overvoltage (also preventing all boxes from breaking at the same time)
+                float conditionFactor = MathHelper.Lerp(5.0f, 1.0f, item.Condition / item.MaxCondition);
+                item.Condition -= deltaTime * Rand.Range(10.0f, 500.0f) * conditionFactor;
+            }
+
+            if (item.Condition > 0.0f || prevCondition <= 0.0f) { return; }
+
+            overloadCooldownTimer = OverloadCooldown;
 #if CLIENT
-                    SoundPlayer.PlaySound("zap", item.WorldPosition, hullGuess: item.CurrentHull);
-                    Vector2 baseVel = Rand.Vector(300.0f);
-                    for (int i = 0; i < 10; i++)
-                    {
-                        var particle = GameMain.ParticleManager.CreateParticle("spark", item.WorldPosition,
-                            baseVel + Rand.Vector(100.0f), 0.0f, item.CurrentHull);
-                        if (particle != null) particle.Size *= Rand.Range(0.5f, 1.0f);
-                    }
+            SoundPlayer.PlaySound("zap", item.WorldPosition, hullGuess: item.CurrentHull);
+            Vector2 baseVel = Rand.Vector(300.0f);
+            for (int i = 0; i < 10; i++)
+            {
+                var particle = GameMain.ParticleManager.CreateParticle("spark", item.WorldPosition,
+                    baseVel + Rand.Vector(100.0f), 0.0f, item.CurrentHull);
+                if (particle != null) particle.Size *= Rand.Range(0.5f, 1.0f);
+            }
 #endif
-                    float currentIntensity = GameMain.GameSession?.EventManager != null ?
-                        GameMain.GameSession.EventManager.CurrentIntensity : 0.5f;
+            float currentIntensity = GameMain.GameSession?.EventManager != null ?
+                GameMain.GameSession.EventManager.CurrentIntensity : 0.5f;
 
-                    //higher probability for fires if the current intensity is low
-                    if (FireProbability > 0.0f &&
-                        Rand.Range(0.0f, 1.0f) < MathHelper.Lerp(FireProbability, FireProbability * 0.1f, currentIntensity))
-                    {
-                        new FireSource(item.WorldPosition);
-                    }
-                }
+            //higher probability for fires if the current intensity is low
+            if (FireProbability > 0.0f &&
+                Rand.Range(0.0f, 1.0f) < MathHelper.Lerp(FireProbability, FireProbability * 0.1f, currentIntensity))
+            {
+                new FireSource(item.WorldPosition);
             }
         }
 
@@ -378,14 +392,30 @@ namespace Barotrauma.Items.Components
             foreach (Connection c in item.Connections)
             {
                 connectionDirty[c] = true;
+                if (c.IsPower)
+                {
+                    ChangedConnections.Add(c);
+                    if (connectedRecipients.TryGetValue(c, out var recipients))
+                    {
+                        recipients.Where(c => c.IsPower).ForEach(c => ChangedConnections.Add(c));
+                    }
+                }
             }
         }
 
         public void SetConnectionDirty(Connection connection)
         {
             var connections = item.Connections;
-            if (connections == null || !connections.Contains(connection)) return;
+            if (connections == null || !connections.Contains(connection)) { return; }
             connectionDirty[connection] = true;
+            if (connection.IsPower)
+            {
+                ChangedConnections.Add(connection);
+                if (connectedRecipients.TryGetValue(connection, out var recipients))
+                {
+                    recipients.Where(c => c.IsPower).ForEach(c => ChangedConnections.Add(c));
+                }
+            }
         }
 
         public override void OnItemLoaded()
@@ -407,7 +437,7 @@ namespace Barotrauma.Items.Components
                 }
             }
 
-            if (this is not RelayComponent)
+            if (this is not RelayComponent and not PowerDistributor)
             {
                 if (PowerConnections.Any(p => !p.IsOutput) && PowerConnections.Any(p => p.IsOutput))
                 {
@@ -435,7 +465,7 @@ namespace Barotrauma.Items.Components
                 {
                     //other junction boxes don't need to receive the signal in the pass-through signal connections
                     //because we relay it straight to the connected items without going through the whole chain of junction boxes
-                    if (ic is PowerTransfer && ic is not RelayComponent) { continue; }
+                    if (ic is PowerTransfer and not RelayComponent and not PowerDistributor) { continue; }
                     ic.ReceiveSignal(signal, recipient);
                 }
 

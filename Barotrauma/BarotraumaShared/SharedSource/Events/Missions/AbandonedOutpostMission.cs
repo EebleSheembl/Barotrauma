@@ -1,6 +1,5 @@
-using Barotrauma.Extensions;
+﻿using Barotrauma.Extensions;
 using Microsoft.Xna.Framework;
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Xml.Linq;
@@ -9,10 +8,6 @@ namespace Barotrauma
 {
     partial class AbandonedOutpostMission : Mission
     {
-        private readonly XElement characterConfig;
-
-        protected readonly List<Character> characters = new List<Character>();
-        private readonly Dictionary<Character, List<Item>> characterItems = new Dictionary<Character, List<Item>>();
         protected readonly HashSet<Character> requireKill = new HashSet<Character>();
         protected readonly HashSet<Character> requireRescue = new HashSet<Character>();
 
@@ -27,9 +22,9 @@ namespace Barotrauma
         private const float EndDelay = 5.0f;
         private float endTimer;
 
-        private bool allowOrderingRescuees;
+        private readonly bool allowOrderingRescuees;
 
-        public override bool AllowRespawn => false;
+        public override bool AllowRespawning => false;
 
         public override bool AllowUndocking
         {
@@ -82,8 +77,6 @@ namespace Barotrauma
         public AbandonedOutpostMission(MissionPrefab prefab, Location[] locations, Submarine sub) : 
             base(prefab, locations, sub)
         {
-            characterConfig = prefab.ConfigElement.GetChildElement("Characters");
-
             allowOrderingRescuees = prefab.ConfigElement.GetAttributeBool(nameof(allowOrderingRescuees), true);
 
             string msgTag = prefab.ConfigElement.GetAttributeString("hostageskilledmessage", "");
@@ -97,8 +90,6 @@ namespace Barotrauma
         {
             failed = false;
             endTimer = 0.0f;
-            characters.Clear();
-            characterItems.Clear();
             requireKill.Clear();
             requireRescue.Clear();
             items.Clear();
@@ -166,142 +157,33 @@ namespace Barotrauma
             }
         }
 
-        private void InitCharacters(Submarine submarine)
+        private int previousKillTargetsRemaining = -1;
+
+        private void TrackKillTargetCount()
         {
-            characters.Clear();
-            characterItems.Clear();
-
-            if (characterConfig != null) 
-            { 
-                foreach (XElement element in characterConfig.Elements())
-                {
-                    if (GameMain.NetworkMember == null && element.GetAttributeBool("multiplayeronly", false)) { continue; }
-
-                    int defaultCount = element.GetAttributeInt("count", -1);
-                    if (defaultCount < 0)
-                    {
-                        defaultCount = element.GetAttributeInt("amount", 1);
-                    }
-                    int min = Math.Min(element.GetAttributeInt("min", defaultCount), 255);
-                    int max = Math.Min(Math.Max(min, element.GetAttributeInt("max", defaultCount)), 255);
-                    int count = Rand.Range(min, max + 1);
-
-                    if (element.Attribute("identifier") != null && element.Attribute("from") != null)
-                    {
-                        HumanPrefab humanPrefab = GetHumanPrefabFromElement(element); 
-                        if (humanPrefab == null)
-                        {
-                            DebugConsole.ThrowError($"Couldn't spawn a human character for abandoned outpost mission: human prefab \"{element.GetAttributeString("identifier", string.Empty)}\" not found",
-                                contentPackage: Prefab.ContentPackage);
-                            continue;
-                        }
-                        for (int i = 0; i < count; i++)
-                        {
-                            LoadHuman(humanPrefab, element, submarine);
-                        }
-                    }
-                    else
-                    {
-                        Identifier speciesName = element.GetAttributeIdentifier("character", element.GetAttributeIdentifier("identifier", Identifier.Empty));
-                        var characterPrefab = CharacterPrefab.FindBySpeciesName(speciesName);
-                        if (characterPrefab == null)
-                        {
-                            DebugConsole.ThrowError($"Couldn't spawn a character for abandoned outpost mission: character prefab \"{speciesName}\" not found",
-                                contentPackage: Prefab.ContentPackage);
-                            continue;
-                        }
-                        for (int i = 0; i < count; i++)
-                        {
-                            LoadMonster(characterPrefab, element, submarine);
-                        }
-                    }
-                }
-            }            
-        }
-
-        private void LoadHuman(HumanPrefab humanPrefab, XElement element, Submarine submarine)
-        {
-            Identifier[] moduleFlags = element.GetAttributeIdentifierArray("moduleflags", null);
-            Identifier[] spawnPointTags = element.GetAttributeIdentifierArray("spawnpointtags", null);
-            var spawnPointType = element.GetAttributeEnum("spawnpointtype", SpawnType.Human);
-            ISpatialEntity spawnPos = SpawnAction.GetSpawnPos(
-                SpawnAction.SpawnLocationType.Outpost, spawnPointType,
-                moduleFlags ?? humanPrefab.GetModuleFlags(),
-                spawnPointTags ?? humanPrefab.GetSpawnPointTags(),
-                element.GetAttributeBool("asfaraspossible", false));
-            spawnPos ??= submarine.GetHulls(alsoFromConnectedSubs: false).GetRandomUnsynced();
-
-            bool requiresRescue = element.GetAttributeBool("requirerescue", false);
-            var teamId = element.GetAttributeEnum("teamid", requiresRescue ? CharacterTeamType.FriendlyNPC : CharacterTeamType.None);
-            Character spawnedCharacter = CreateHuman(humanPrefab, characters, characterItems, submarine, teamId, spawnPos);
-            if (Level.Loaded?.StartOutpost?.Info is { } outPostInfo)
+            if (requireKill.Count == 0) { return; }
+            
+            if (previousKillTargetsRemaining == -1)
             {
-                outPostInfo.AddOutpostNPCIdentifierOrTag(spawnedCharacter, humanPrefab.Identifier);
-                foreach (Identifier tag in humanPrefab.GetTags())
-                {
-                    outPostInfo.AddOutpostNPCIdentifierOrTag(spawnedCharacter, tag);
-                }
+                previousKillTargetsRemaining = requireKill.Count();
             }
-
-            if (spawnPos is WayPoint wp)
+            
+            int killTargetsRemaining = requireKill.Count(c => !c.Removed && !c.IsDead && !(c.LockHands && c.Submarine == Submarine.MainSub));
+            // at least one of the targets have been eliminated
+            if (killTargetsRemaining < previousKillTargetsRemaining)
             {
-                spawnedCharacter.GiveIdCardTags(wp);
-            }
-
-            if (requiresRescue)
-            {
-                requireRescue.Add(spawnedCharacter);
 #if CLIENT
-                if (allowOrderingRescuees)
-                {
-                    GameMain.GameSession.CrewManager.AddCharacterToCrewList(spawnedCharacter);
-                }
+                SteamTimelineManager.OnOutpostTargetEliminated(this);
 #endif
             }
-            else if (TimesAttempted > 0 && spawnedCharacter.AIController is HumanAIController humanAi)
-            {
-                var order = OrderPrefab.Prefabs["fightintruders"]
-                    .CreateInstance(OrderPrefab.OrderTargetType.Entity, orderGiver: spawnedCharacter)
-                    .WithManualPriority(CharacterInfo.HighestManualOrderPriority);
-                spawnedCharacter.SetOrder(order, isNewOrder: true, speak: false);
-            }
-
-            if (element.GetAttributeBool("requirekill", false))
-            {
-                requireKill.Add(spawnedCharacter);
-            }
+            
+            previousKillTargetsRemaining = killTargetsRemaining;
         }
-
-        private void LoadMonster(CharacterPrefab monsterPrefab, XElement element, Submarine submarine)
-        {
-            Identifier[] moduleFlags = element.GetAttributeIdentifierArray("moduleflags", null);
-            Identifier[] spawnPointTags = element.GetAttributeIdentifierArray("spawnpointtags", null);
-            ISpatialEntity spawnPos = SpawnAction.GetSpawnPos(SpawnAction.SpawnLocationType.Outpost, SpawnType.Enemy, moduleFlags, spawnPointTags, element.GetAttributeBool("asfaraspossible", false));
-            spawnPos ??= submarine.GetHulls(alsoFromConnectedSubs: false).GetRandomUnsynced();
-            Character spawnedCharacter = Character.Create(monsterPrefab.Identifier, spawnPos.WorldPosition, ToolBox.RandomSeed(8), createNetworkEvent: false);
-            characters.Add(spawnedCharacter);
-            if (element.GetAttributeBool("requirekill", false))
-            {
-                requireKill.Add(spawnedCharacter);
-            }
-            if (spawnedCharacter.Inventory != null)
-            {
-                characterItems.Add(spawnedCharacter, spawnedCharacter.Inventory.FindAllItems(recursive: true));
-            }
-            if (submarine != null && spawnedCharacter.AIController is EnemyAIController enemyAi)
-            {
-                enemyAi.UnattackableSubmarines.Add(submarine);
-                enemyAi.UnattackableSubmarines.Add(Submarine.MainSub);
-                foreach (Submarine sub in Submarine.MainSub.DockedTo)
-                {
-                    enemyAi.UnattackableSubmarines.Add(sub);
-                }
-            }
-        }
-
-
+        
         protected override void UpdateMissionSpecific(float deltaTime)
         {
+            TrackKillTargetCount();
+            
             if (State != HostagesKilledState)
             {
                 if (requireRescue.Any(r => r.Removed || r.IsDead))
@@ -316,7 +198,7 @@ namespace Barotrauma
                 if (endTimer > EndDelay)
                 {
 #if SERVER
-                    if (!(GameMain.GameSession.GameMode is CampaignMode) && GameMain.Server != null)
+                    if (GameMain.GameSession.GameMode is not CampaignMode && GameMain.Server != null)
                     {
                         GameMain.Server.EndGame();                        
                     }
@@ -337,7 +219,7 @@ namespace Barotrauma
                     break;
 #if SERVER
                 case 1:
-                    if (!(GameMain.GameSession.GameMode is CampaignMode) && GameMain.Server != null)
+                    if (GameMain.GameSession.GameMode is not CampaignMode && GameMain.Server != null)
                     {
                         if (!Submarine.MainSub.AtStartExit || (wasDocked && !Submarine.MainSub.DockedTo.Contains(Level.Loaded.StartOutpost)))
                         {
@@ -359,6 +241,45 @@ namespace Barotrauma
         protected override void EndMissionSpecific(bool completed)
         {
             failed = !completed && requireRescue.Any(r => r.Removed || r.IsDead);
+        }
+
+        protected override void InitCharacter(Character character, XElement element)
+        {
+            base.InitCharacter(character, element);
+            if (element.GetAttributeBool("requirekill", false))
+            {
+                requireKill.Add(character);
+            }
+        }
+
+        protected override Character LoadHuman(HumanPrefab humanPrefab, XElement element, Submarine submarine)
+        {
+            Character spawnedCharacter = base.LoadHuman(humanPrefab, element, submarine);
+            bool requiresRescue = element.GetAttributeBool("requirerescue", false);
+            if (requiresRescue)
+            {
+                requireRescue.Add(spawnedCharacter);
+#if CLIENT
+                if (allowOrderingRescuees)
+                {
+                    GameMain.GameSession.CrewManager?.AddCharacterToCrewList(spawnedCharacter);
+                }
+#endif
+            }
+            else if (TimesAttempted > 0 && spawnedCharacter.AIController is HumanAIController)
+            {
+                var order = OrderPrefab.Prefabs["fightintruders"]
+                    .CreateInstance(OrderPrefab.OrderTargetType.Entity, orderGiver: spawnedCharacter)
+                    .WithManualPriority(CharacterInfo.HighestManualOrderPriority);
+                spawnedCharacter.SetOrder(order, isNewOrder: true, speak: false);
+            }
+            // Overrides the team change set in the base method.
+            var teamId = element.GetAttributeEnum("teamid", requiresRescue ? CharacterTeamType.FriendlyNPC : CharacterTeamType.None);
+            if (teamId != spawnedCharacter.TeamID)
+            {
+                spawnedCharacter.SetOriginalTeamAndChangeTeam(teamId);
+            }
+            return spawnedCharacter;
         }
     }
 }

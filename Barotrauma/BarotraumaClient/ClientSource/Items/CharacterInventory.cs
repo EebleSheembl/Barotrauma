@@ -84,7 +84,7 @@ namespace Barotrauma
             get { return layout; }
             set
             {
-                if (layout == value) return;
+                if (layout == value) { return; }
                 layout = value;
                 SetSlotPositions(layout);
             }
@@ -259,8 +259,8 @@ namespace Barotrauma
             int spacing = GUI.IntScale(5);
 
             SlotSize = (SlotSpriteSmall.size * UIScale * GUI.AspectRatioAdjustment).ToPoint();
-            int bottomOffset = SlotSize.Y + spacing * 2 + ContainedIndicatorHeight;
-            int personalSlotY = GameMain.GraphicsHeight - bottomOffset * 2 - spacing * 2 - (int)(UnequippedIndicator.size.Y * UIScale);
+            int bottomOffset = GetBottomOffset(multiplier: 2);
+            int personalSlotY = GetVerticalOffsetFromBottom(multiplier: 2);
 
             if (visualSlots == null) { CreateSlots(); }
             if (visualSlots.None()) { return; }
@@ -353,7 +353,15 @@ namespace Barotrauma
                 case Layout.Left:
                     {
                         int x = HUDLayoutSettings.InventoryAreaLower.X;
+                        if (!GUI.IsUltrawide && GUI.IsHUDScaled)
+                        {
+                            // On non-ultra-wide aspect ratios, the inventories can easily overlap with each other, if there's any scaling.
+                            // So let's offset the other inventory to the left.
+                            const float margin = 100;
+                            x -= HUDLayoutSettings.ChatBoxArea.Width - (int)margin;
+                        }
                         int personalSlotX = x;
+                        float y = GameMain.GraphicsHeight - bottomOffset;
 
                         for (int i = 0; i < SlotPositions.Length; i++)
                         {
@@ -366,7 +374,7 @@ namespace Barotrauma
                             }
                             else
                             {
-                                SlotPositions[i] = new Vector2(x, GameMain.GraphicsHeight - bottomOffset);
+                                SlotPositions[i] = new Vector2(x, y);
                                 x += visualSlots[i].Rect.Width + spacing;
                             }
                         }
@@ -380,7 +388,7 @@ namespace Barotrauma
                                 continue;
                             }
                             if (!HideSlot(i) || SlotTypes[i] == InvSlotType.HealthInterface) { continue; }
-                            SlotPositions[i] = new Vector2(x, GameMain.GraphicsHeight - bottomOffset);
+                            SlotPositions[i] = new Vector2(x, y);
                             x += visualSlots[i].Rect.Width + spacing;
                         }
                     }
@@ -446,6 +454,9 @@ namespace Barotrauma
                     visualSlots[i].DrawOffset = Vector2.Zero;
                 }
             }
+            
+            int GetBottomOffset(int multiplier) => SlotSize.Y + spacing * multiplier + ContainedIndicatorHeight;
+            int GetVerticalOffsetFromBottom(int multiplier) => GameMain.GraphicsHeight - (GetBottomOffset(multiplier) + spacing) * multiplier - (int)(UnequippedIndicator.size.Y * UIScale);
         }
 
         protected override void ControlInput(Camera cam)
@@ -760,6 +771,8 @@ namespace Barotrauma
 
         private QuickUseAction GetQuickUseAction(Item item, bool allowEquip, bool allowInventorySwap, bool allowApplyTreatment)
         {
+            if (!item.IsInteractable(Character.Controlled)) { return QuickUseAction.None; }
+
             if (allowApplyTreatment && CharacterHealth.OpenHealthWindow != null && 
                 //if the item can be equipped in the health interface slot, don't use it as a treatment but try to equip it
                 !item.AllowedSlots.Contains(InvSlotType.HealthInterface))
@@ -785,7 +798,7 @@ namespace Barotrauma
                 {
                     if (item.Container == null || character.Inventory.FindIndex(item.Container) == -1) // Not a subinventory in the character's inventory
                     {
-                        if (character.HeldItems.Any(i => i.OwnInventory != null && i.OwnInventory.CanBePut(item)))
+                        if (character.HeldItems.Any(i => i.OwnInventory != null && i.OwnInventory.CanBePut(item) && character.CanAccessInventory(i.OwnInventory)))
                         {
                             return QuickUseAction.PutToEquippedItem;
                         }
@@ -843,13 +856,14 @@ namespace Barotrauma
                 else if (character.HeldItems.FirstOrDefault(i =>
                     i.OwnInventory != null &&
                     i.OwnInventory.Container.DrawInventory &&
+                    character.CanAccessInventory(i.OwnInventory) &&
                     (i.OwnInventory.CanBePut(item) || ((i.OwnInventory.Capacity == 1 || i.OwnInventory.Container.HasSubContainers) && i.OwnInventory.AllowSwappingContainedItems && i.OwnInventory.Container.CanBeContained(item)))) is { } equippedContainer)
                 {
                     if (allowEquip)
                     {
                         if (!character.HasEquippedItem(item))
                         {
-                            if (equippedContainer.GetComponent<ItemContainer>() is { QuickUseMovesItemsInside: false})
+                            if (equippedContainer.GetComponent<ItemContainer>() is { QuickUseMovesItemsInside: false })
                             {
                                 //put the item in a hand slot if that hand is free
                                 if ((item.AllowedSlots.Contains(InvSlotType.RightHand) && character.Inventory.GetItemInLimbSlot(InvSlotType.RightHand) == null) ||

@@ -1,4 +1,4 @@
-using Barotrauma.Extensions;
+﻿using Barotrauma.Extensions;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -48,17 +48,30 @@ namespace Barotrauma
 
         public readonly LanguageIdentifier Language;
 
-
         public readonly record struct Text(
             string String,
             bool IsOverride,
             TextPack TextPack);
 
-        public readonly ImmutableDictionary<Identifier, ImmutableArray<Text>> Texts;
+
+        private ImmutableDictionary<Identifier, ImmutableArray<Text>> texts;
+
+        public ImmutableDictionary<Identifier, ImmutableArray<Text>> Texts 
+        {
+            get 
+            { 
+                if (texts == null)
+                {
+                    DebugConsole.NewMessage($"Accessed texts in an unloaded text package ({Language}). Loading the text pack...");
+                    VerifyLoaded();
+                }
+                return texts;
+            }
+        }
         public readonly string TranslatedName;
         public readonly bool NoWhitespace;
 
-        public TextPack(TextFile file, ContentXElement mainElement, LanguageIdentifier language)
+        public TextPack(TextFile file, ContentXElement mainElement, LanguageIdentifier language, bool load = false)
         {
             ContentFile = file;
 
@@ -72,6 +85,20 @@ namespace Barotrauma
             Language = language;
             TranslatedName = mainElement.GetAttributeString("translatedname", languageName.Value);
             NoWhitespace = mainElement.GetAttributeBool("nowhitespace", false);
+
+            if (load)
+            {
+                VerifyLoaded();
+            }
+        }
+
+        public void VerifyLoaded()
+        {
+            //already loaded
+            if (this.texts != null) { return; }
+
+            XDocument doc = XMLExtensions.TryLoadXml(ContentFile.Path);
+            var mainElement = doc.Root.FromPackage(ContentFile.ContentPackage);
 
             Dictionary<Identifier, List<Text>> texts = new Dictionary<Identifier, List<Text>>();
             LoadElements(mainElement, isOverride: mainElement.IsOverride());
@@ -103,9 +130,14 @@ namespace Barotrauma
                 }
             }
 
-            Texts = texts.Select(kvp => (kvp.Key, kvp.Value.ToImmutableArray())).ToImmutableDictionary();
+            this.texts = texts.Select(kvp => (kvp.Key, kvp.Value.ToImmutableArray())).ToImmutableDictionary();
         }
-        
+
+        public void Unload()
+        {
+            texts = null;
+        }
+
 #if DEBUG
         public void CheckForDuplicates(int index)
         {
@@ -128,7 +160,7 @@ namespace Barotrauma
                 }
                 
                 string infoContent = subElement.Value;
-                if (string.IsNullOrEmpty(infoContent)) continue;
+                if (string.IsNullOrEmpty(infoContent)) { continue; }
                 if (!contentCounts.ContainsKey(infoContent))
                 {
                     contentCounts.Add(infoContent, 1);
@@ -146,15 +178,18 @@ namespace Barotrauma
             sb.AppendLine();
             sb.AppendLine();
 
+            List<string> lines = new List<string>();
             for (int i = 0; i < tagCounts.Keys.Count; i++)
             {
                 if (tagCounts[Texts.Keys.ElementAt(i)] > 1)
                 {
-                    sb.Append(Texts.Keys.ElementAt(i) + " | Count: " + tagCounts[Texts.Keys.ElementAt(i)]);
-                    sb.AppendLine();
+                    lines.Add(Texts.Keys.ElementAt(i) + " | Count: " + tagCounts[Texts.Keys.ElementAt(i)]);
                 }
             }
-
+            foreach (string line in lines.OrderBy(l => l))
+            {
+                sb.AppendLine(line);
+            }
             sb.AppendLine();
             sb.AppendLine();
             sb.Append("Duplicate content:");

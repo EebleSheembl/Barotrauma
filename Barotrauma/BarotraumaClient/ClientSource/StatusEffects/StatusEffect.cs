@@ -15,7 +15,8 @@ namespace Barotrauma
         private readonly static HashSet<StatusEffect> ActiveLoopingSounds = new HashSet<StatusEffect>();
         private static double LastMuffleCheckTime;
         private readonly List<RoundSound> sounds = new List<RoundSound>();
-        public IEnumerable<RoundSound> Sounds { get { return sounds; } }
+        public IEnumerable<RoundSound> Sounds => sounds;
+
         private SoundSelectionMode soundSelectionMode;
         private SoundChannel soundChannel;
         private Entity soundEmitter;
@@ -64,6 +65,16 @@ namespace Barotrauma
 
         partial void ApplyProjSpecific(float deltaTime, Entity entity, IReadOnlyList<ISerializableEntity> targets, Hull hull, Vector2 worldPosition, bool playSound)
         {
+            if (steamTimeLineEventToTrigger != default)
+            {
+                SteamTimelineManager.AddTimelineEvent(
+                    steamTimeLineEventToTrigger.title,
+                    steamTimeLineEventToTrigger.description,
+                    steamTimeLineEventToTrigger.icon,
+                    priority: 1,
+                    submarine: entity?.Submarine);
+            }
+
             if (playSound)
             {
                 PlaySound(entity, hull, worldPosition);
@@ -78,14 +89,23 @@ namespace Barotrauma
                 {
                     bool entityAngleAssigned = false;
                     Limb targetLimb = null;
-                    if (entity is Item item && item.body != null)
+                    if (entity is Item item)
                     {
-                        angle = item.body.Rotation + ((item.body.Dir > 0.0f) ? 0.0f : MathHelper.Pi);
-                        particleRotation = -item.body.Rotation;
-                        if (emitter.Prefab.Properties.CopyEntityDir && item.body.Dir < 0.0f)
+                        if (item.body != null)
                         {
-                            particleRotation += MathHelper.Pi;
-                            mirrorAngle = true;
+                            angle = item.body.Rotation + ((item.body.Dir > 0.0f) ? 0.0f : MathHelper.Pi);
+                            particleRotation = -item.body.Rotation;
+                            if (emitter.Prefab.Properties.CopyEntityDir && item.body.Dir < 0.0f)
+                            {
+                                particleRotation += MathHelper.Pi;
+                                mirrorAngle = true;
+                            }
+                        }
+                        else
+                        {
+                            angle = -item.RotationRad;
+                            if (item.FlippedX) { angle += MathHelper.Pi; }
+                            particleRotation = item.RotationRad;
                         }
                         entityAngleAssigned = true;
                     }
@@ -132,9 +152,12 @@ namespace Barotrauma
 
         private bool ignoreMuffling;
 
+        private RoundSound lastPlayingSound;
+
         private void PlaySound(Entity entity, Hull hull, Vector2 worldPosition)
         {
             if (sounds.Count == 0) { return; }
+            if (entity is { Submarine.Loading: true }) { return; }
 
             if (soundChannel == null || !soundChannel.IsPlaying || forcePlaySounds)
             {
@@ -183,15 +206,11 @@ namespace Barotrauma
             else
             {
                 soundChannel.Position = new Vector3(worldPosition, 0.0f);
+                if (lastPlayingSound != null && lastPlayingSound.Stream) { lastPlayingSound.LastStreamSeekPos = soundChannel.StreamSeekPos; }
             }
 
-            if (soundChannel != null && soundChannel.Looping)
-            {
-                ActiveLoopingSounds.Add(this);
-                soundEmitter = entity;
-                loopStartTime = Timing.TotalTime;
-            }
-                        
+            KeepLoopingSoundAlive(soundChannel);
+
             void PlaySoundOrDelayIfNotLoaded(RoundSound selectedSound)
             {
                 if (playSoundAfterLoadedCoroutine != null) { return; }
@@ -217,19 +236,39 @@ namespace Barotrauma
                 {
                     PlaySound(selectedSound);
                 }
+                playSoundAfterLoadedCoroutine = null;
                 yield return CoroutineStatus.Success;
             }
 
             void PlaySound(RoundSound selectedSound)
             {
-                //if the sound loops, we must make sure the existing channel
+                //if the sound loops, we must make sure the existing channel has been stopped first before attempting to play a new one
                 System.Diagnostics.Debug.Assert(
                     soundChannel == null || !soundChannel.IsPlaying || soundChannel.FadingOutAndDisposing || !soundChannel.Looping,
                     "A StatusEffect attempted to play a sound, but an looping sound is already playing. The looping sound should be stopped before playing a new one, or it will keep looping indefinitely.");
                 
                 soundChannel = SoundPlayer.PlaySound(selectedSound.Sound, worldPosition, selectedSound.Volume, selectedSound.Range, hullGuess: hull, ignoreMuffling: selectedSound.IgnoreMuffling, freqMult: selectedSound.GetRandomFrequencyMultiplier());
                 ignoreMuffling = selectedSound.IgnoreMuffling;
-                if (soundChannel != null) { soundChannel.Looping = loopSound; }
+                if (soundChannel != null)
+                {
+                    if (soundChannel.IsStream && lastPlayingSound == selectedSound)
+                    {
+                        soundChannel.StreamSeekPos = lastPlayingSound.LastStreamSeekPos;
+                    }
+                    lastPlayingSound = selectedSound;
+                    soundChannel.Looping = loopSound;
+                    KeepLoopingSoundAlive(soundChannel);
+                }
+            }
+
+            void KeepLoopingSoundAlive(SoundChannel soundChannel)
+            {
+                if (soundChannel != null && soundChannel.Looping)
+                {
+                    ActiveLoopingSounds.Add(this);
+                    soundEmitter = entity;
+                    loopStartTime = Timing.TotalTime;
+                }                
             }
         }
 

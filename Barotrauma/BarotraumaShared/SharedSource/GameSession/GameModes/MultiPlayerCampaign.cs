@@ -92,6 +92,11 @@ namespace Barotrauma
             get; set;
         }
 
+        public byte RoundID
+        {
+            get; set;
+        }
+
         private MultiPlayerCampaign(CampaignSettings settings) : base(GameModePreset.MultiPlayerCampaign, settings)
         {
             currentCampaignID++;
@@ -116,7 +121,6 @@ namespace Barotrauma
             //only the server generates the map, the clients load it from a save file
             if (GameMain.NetworkMember != null && GameMain.NetworkMember.IsServer)
             {
-                campaign.Settings = settings;
                 campaign.map = new Map(campaign, mapSeed);
             }
             campaign.InitProjSpecific();
@@ -133,39 +137,31 @@ namespace Barotrauma
         }
 
         partial void InitProjSpecific();
-                
-        public static string GetCharacterDataSavePath(string savePath)
+
+        public static string GetCharacterDataSavePath(string loadPath)
         {
-            return Path.Combine(Path.GetDirectoryName(savePath), Path.GetFileNameWithoutExtension(savePath) + "_CharacterData.xml");
+            string directory = Path.GetDirectoryName(loadPath);
+            string fileName = Path.GetFileNameWithoutExtension(loadPath);
+
+            if (CampaignDataPath.IsBackupPath(loadPath, out uint backupIndex))
+            {
+                string trimmedFileName = Path.GetFileNameWithoutExtension(fileName);
+                return Path.Combine(directory, $"{trimmedFileName}_CharacterData{SaveUtil.BackupCharacterDataExtensionStart}{backupIndex}");
+            }
+            return Path.Combine(directory, $"{fileName}_CharacterData.xml");
         }
 
-        public static string GetCharacterDataSavePath()
-        {
-            return GetCharacterDataSavePath(GameMain.GameSession.SavePath);
-        }
+        public static string GetCharacterDataPathForLoading()
+            => GetCharacterDataSavePath(GameMain.GameSession.DataPath.LoadPath);
+        public static string GetCharacterDataPathForSaving()
+            => GetCharacterDataSavePath(GameMain.GameSession.DataPath.SavePath);
 
         /// <summary>
         /// Loads the campaign from an XML element. Creates the map if it hasn't been created yet, otherwise updates the state of the map.
         /// </summary>
         private void Load(XElement element)
         {
-            PurchasedLostShuttlesInLatestSave = element.GetAttributeBool("purchasedlostshuttles", false);
-            PurchasedHullRepairsInLatestSave = element.GetAttributeBool("purchasedhullrepairs", false);
-            PurchasedItemRepairsInLatestSave = element.GetAttributeBool("purchaseditemrepairs", false);
-            CheatsEnabled = element.GetAttributeBool("cheatsenabled", false);
-            if (CheatsEnabled)
-            {
-                DebugConsole.CheatsEnabled = true;
-                if (!AchievementManager.CheatsEnabled)
-                {
-                    AchievementManager.CheatsEnabled = true;
-#if CLIENT
-                    new GUIMessageBox("Cheats enabled", "Cheat commands have been enabled on the server. You will not receive achievements until you restart the game.");       
-#else
-                    DebugConsole.NewMessage("Cheat commands have been enabled.", Color.Red);
-#endif
-                }
-            }
+            LoadSaveSharedSingleAndMultiplayer(element);
 
             foreach (var subElement in element.Elements())
             {
@@ -203,29 +199,10 @@ namespace Barotrauma
                             }
                         }
                         break;
-                    case "upgrademanager":
-                    case "pendingupgrades":
-                        UpgradeManager = new UpgradeManager(this, subElement, isSingleplayer: false);
-                        break;
                     case "bots" when GameMain.NetworkMember != null && GameMain.NetworkMember.IsServer:
                         CrewManager.HasBots = subElement.GetAttributeBool("hasbots", false);
                         CrewManager.AddCharacterElements(subElement);
                         ActiveOrdersElement = subElement.GetChildElement("activeorders");
-                        break;
-                    case "cargo":
-                        CargoManager?.LoadPurchasedItems(subElement);
-                        break;
-                    case "pets":
-                        petsElement = subElement;
-                        break;
-                    case "stats":
-                        LoadStats(subElement);
-                        break;
-                    case "eventmanager":
-                        GameMain.GameSession.EventManager.Load(subElement);
-                        break;
-                    case Wallet.LowerCaseSaveElementName:
-                        Bank = new Wallet(Option<Character>.None(), subElement);
                         break;
 #if SERVER
                     case "traitormanager":
@@ -241,20 +218,11 @@ namespace Barotrauma
                 }
             }
 
-            int oldMoney = element.GetAttributeInt("money", 0);
-            if (oldMoney > 0)
-            {
-                Bank = new Wallet(Option<Character>.None())
-                {
-                    Balance = oldMoney
-                };
-            }
-
             UpgradeManager ??= new UpgradeManager(this);
 
 #if SERVER
             characterData.Clear();
-            string characterDataPath = GetCharacterDataSavePath();
+            string characterDataPath = GetCharacterDataPathForLoading();
             if (!File.Exists(characterDataPath))
             {
                 DebugConsole.ThrowError($"Failed to load the character data for the campaign. Could not find the file \"{characterDataPath}\".");
